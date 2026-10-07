@@ -10,11 +10,12 @@ import {
   formatUsd,
   getCacheStatus,
   getRetention,
+  resolveTtlMs,
   warmCost,
 } from "../extensions/cache-guard-logic.ts"
 
 const opus = {
-  provider: "anthropic-vertex", id: "claude-opus-4-8", name: "Claude Opus 4.8", contextWindow: 1_000_000,
+  provider: "anthropic-vertex", id: "claude-opus-4-8", api: "anthropic-messages", name: "Claude Opus 4.8", contextWindow: 1_000_000,
   cost: { input: 5, output: 25, cacheRead: 0.5, cacheWrite: 6.25 }, promptCache: { short: 300, long: 3600 },
 }
 const sonnet = { ...opus, id: "claude-sonnet-5", name: "Claude Sonnet 5", cost: { input: 3, output: 15, cacheRead: 0.3, cacheWrite: 3.75 } }
@@ -34,20 +35,38 @@ test("finds the last request that touched the cache", () => {
     { type: "usage", kind: "cache_warm", provider: opus.provider, model: opus.id, timestamp: new Date(2_000).toISOString(), usage: usage(0, 110, 0) },
     assistant(3_000, usage(0, 0, 0)), // failed request: no usage
   ]
-  assert.deepEqual(findLastCacheHit(entries), { at: 2_000, provider: opus.provider, model: opus.id, promptTokens: 110 })
-  assert.deepEqual(findLastCacheHit(entries.slice(0, 1)), { at: 1_000, provider: opus.provider, model: opus.id, promptTokens: 110 })
+  assert.deepEqual(findLastCacheHit(entries), { at: 2_000, provider: opus.provider, model: opus.id, promptTokens: 110, cached: true })
+  assert.deepEqual(findLastCacheHit(entries.slice(0, 1)), { at: 1_000, provider: opus.provider, model: opus.id, promptTokens: 110, cached: true })
+  assert.equal(findLastCacheHit([assistant(1_000, usage(500, 0, 0))]).cached, false)
   assert.equal(findLastCacheHit([...entries, { type: "compaction" }]), undefined)
   assert.equal(findLastCacheHit([]), undefined)
 })
 
 test("derives warm, cold, and none from the model TTL", () => {
-  const hit = { at: 0, provider: opus.provider, model: opus.id, promptTokens: 1 }
+  const hit = { at: 0, provider: opus.provider, model: opus.id, promptTokens: 1, cached: true }
   assert.deepEqual(getCacheStatus(opus, hit, "short", 60_000), { state: "warm", remainingMs: 240_000 })
   assert.deepEqual(getCacheStatus(opus, hit, "short", 400_000), { state: "cold", expiredForMs: 100_000 })
   assert.deepEqual(getCacheStatus(opus, hit, "long", 400_000), { state: "warm", remainingMs: 3_200_000 })
   assert.deepEqual(getCacheStatus(haiku, hit, "short", 1), { state: "cold" })
-  assert.deepEqual(getCacheStatus({ ...opus, promptCache: undefined }, hit, "short", 1), { state: "none" })
+  assert.deepEqual(getCacheStatus({ ...opus, promptCache: undefined }, { ...hit, cached: false }, "short", 1), { state: "none" })
   assert.deepEqual(getCacheStatus(opus, undefined, "short", 1), { state: "none" })
+})
+
+test("falls back to protocol lifetimes when the catalog has none (GitHub Copilot)", () => {
+  const copilotClaude = { ...opus, provider: "github-copilot", id: "claude-opus-4.8", promptCache: undefined }
+  const copilotGpt = { ...copilotClaude, id: "gpt-6-sol", api: "openai-responses" }
+  const copilotGemini = { ...copilotClaude, id: "gemini-3.8-flash", api: "openai-completions" }
+  const cached = { cached: true }
+  assert.equal(resolveTtlMs(copilotClaude, "short", cached), 300_000)
+  assert.equal(resolveTtlMs(copilotClaude, "long", cached), 3_600_000)
+  assert.equal(resolveTtlMs(copilotGpt, "long", cached), 300_000)
+  assert.equal(resolveTtlMs(copilotGemini, "short", cached), undefined)
+  // No cache use observed on this route: do not guess.
+  assert.equal(resolveTtlMs(copilotClaude, "short", { cached: false }), undefined)
+  // The catalog always wins.
+  assert.equal(resolveTtlMs({ ...copilotClaude, promptCache: { short: 60, long: 120 } }, "short", cached), 60_000)
+  const hit = { at: 0, provider: "github-copilot", model: "claude-opus-4.8", promptTokens: 1, cached: true }
+  assert.deepEqual(getCacheStatus(copilotClaude, hit, "long", 600_000), { state: "warm", remainingMs: 3_000_000 })
 })
 
 test("prices cold and warm sends from the catalog", () => {

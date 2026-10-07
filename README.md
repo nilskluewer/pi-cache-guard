@@ -19,7 +19,16 @@ Prompt cache is cold (it expired 2 h ago). This message re-sends ~150k tokens: ~
 
 ## No maintenance
 
-The extension has no price list and no TTL table. It reads `model.cost` and `model.promptCache` from Pi's model catalog, which Pi updates from pi.dev (`pi update --models`). Costs use Pi's own `calculateCost`, so price tiers and 1-hour cache writes are included. Models without a declared cache lifetime are ignored.
+The extension has no price list and no per-model TTL table. It reads `model.cost` and `model.promptCache` from Pi's model catalog, which Pi updates from pi.dev (`pi update --models`). Costs use Pi's own `calculateCost`, so price tiers and 1-hour cache writes are included.
+
+Some routes, such as GitHub Copilot, have no `promptCache` in the catalog. For these, the extension uses one lifetime per API protocol, from the provider docs (conservative end):
+
+| API | Lifetime |
+|---|---|
+| `anthropic-messages` (Claude) | 5 min, or 1 h with `PI_CACHE_RETENTION=long` |
+| `openai-responses` (GPT) | 5 min |
+
+The fallback applies only when the last request reported cache tokens, so it never guesses for a route that does not cache. Other protocols (for example Gemini through `openai-completions`) show nothing. Their cache is short and a miss costs only the normal input price.
 
 ## Install
 

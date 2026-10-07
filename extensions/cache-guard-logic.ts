@@ -9,6 +9,8 @@ export interface CacheHit {
   provider: string
   model: string
   promptTokens: number
+  /** The request reported cache reads or writes, so this route caches. */
+  cached: boolean
 }
 
 export type CacheStatus =
@@ -28,6 +30,30 @@ export function getTtlMs(model: Pick<Model<Api>, "promptCache">, retention: Rete
   return seconds && seconds > 0 ? seconds * 1000 : undefined
 }
 
+/**
+ * Cache lifetimes in seconds per API protocol, from the provider docs (conservative end).
+ * Used only when Pi's catalog declares no `promptCache` (for example GitHub Copilot)
+ * and the last request reported cache use. Keyed by protocol, so new models need no change.
+ */
+export const API_CACHE_FALLBACK: Readonly<Record<string, { short: number; long: number }>> = {
+  // Anthropic: 5 min default, 1 h with extended retention.
+  "anthropic-messages": { short: 300, long: 3600 },
+  // OpenAI: cached prefixes stay 5–10 min after the last use (best effort).
+  "openai-responses": { short: 300, long: 300 },
+}
+
+/** Catalog lifetime first; otherwise the protocol fallback when the route proved it caches. */
+export function resolveTtlMs(
+  model: Pick<Model<Api>, "api" | "promptCache">,
+  retention: Retention,
+  hit: Pick<CacheHit, "cached"> | undefined,
+): number | undefined {
+  const declared = getTtlMs(model, retention)
+  if (declared !== undefined || !hit?.cached) return declared
+  const fallback = API_CACHE_FALLBACK[model.api]?.[retention]
+  return fallback ? fallback * 1000 : undefined
+}
+
 export function promptTokens(usage: Pick<Usage, "input" | "cacheRead" | "cacheWrite"> | undefined): number {
   if (!usage) return 0
   return (usage.input ?? 0) + (usage.cacheRead ?? 0) + (usage.cacheWrite ?? 0)
@@ -45,7 +71,7 @@ export function findLastCacheHit(entries: readonly Entry[]): CacheHit | undefine
     if (entry.type === "usage" && entry.kind === "cache_warm") {
       const tokens = promptTokens(entry.usage)
       if (tokens > 0) {
-        return { at: Date.parse(entry.timestamp ?? ""), provider: entry.provider, model: entry.model, promptTokens: tokens }
+        return { at: Date.parse(entry.timestamp ?? ""), provider: entry.provider, model: entry.model, promptTokens: tokens, cached: true }
       }
     }
     if (entry.type === "message" && entry.message?.role === "assistant") {
@@ -55,7 +81,8 @@ export function findLastCacheHit(entries: readonly Entry[]): CacheHit | undefine
       if (tokens > 0) {
         // The message timestamp is the request start: the conservative TTL anchor.
         const at = typeof message.timestamp === "number" ? message.timestamp : Date.parse(entry.timestamp ?? "")
-        return { at, provider: message.provider, model: message.model, promptTokens: tokens }
+        const cached = (message.usage.cacheRead ?? 0) + (message.usage.cacheWrite ?? 0) > 0
+        return { at, provider: message.provider, model: message.model, promptTokens: tokens, cached }
       }
     }
   }
@@ -63,12 +90,12 @@ export function findLastCacheHit(entries: readonly Entry[]): CacheHit | undefine
 }
 
 export function getCacheStatus(
-  model: Pick<Model<Api>, "provider" | "id" | "promptCache">,
+  model: Pick<Model<Api>, "provider" | "id" | "api" | "promptCache">,
   hit: CacheHit | undefined,
   retention: Retention,
   now: number,
 ): CacheStatus {
-  const ttl = getTtlMs(model, retention)
+  const ttl = resolveTtlMs(model, retention, hit)
   if (ttl === undefined || !hit || !Number.isFinite(hit.at)) return { state: "none" }
   // Prompt caches are per model: a model change always starts cold.
   if (hit.provider !== model.provider || hit.model !== model.id) return { state: "cold" }
