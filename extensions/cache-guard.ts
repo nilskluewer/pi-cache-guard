@@ -33,6 +33,15 @@ const PLACEMENT_HELP: Record<Placement, string> = {
 }
 const BAR_WIDTH = 10
 
+/** Border colour of the corner box: RGB 39, 59, 72. */
+const border = (s: string) => "\x1b[38;2;39;59;72m" + s + "\x1b[39m"
+
+/** Draw text (visible width `width`) in a rounded box. */
+function box(text: string, width: number): string[] {
+  const line = "─".repeat(width + 2)
+  return [border("╭" + line + "╮"), border("│") + " " + text + " " + border("│"), border("╰" + line + "╯")]
+}
+
 /** Progress bar of the remaining cache lifetime, for example `▰▰▰▰▰▰▱▱▱▱`. Returns the filled and empty parts. */
 function bar(remainingMs: number, ttlMs: number): { filled: string; empty: string } {
   const filled = Math.max(0, Math.min(BAR_WIDTH, Math.ceil((remainingMs / ttlMs) * BAR_WIDTH)))
@@ -96,11 +105,11 @@ export default function cacheGuardExtension(pi: ExtensionAPI) {
         (tui, _theme, _kb, done) => {
           state.tui = tui
           state.close = () => done()
-          return { render: () => (state.text ? [state.text] : []), invalidate() {} }
+          return { render: () => (state.text ? box(state.text, state.width) : []), invalidate() {} }
         },
         {
           overlay: true,
-          overlayOptions: () => ({ anchor: "top-right", width: Math.max(1, state.width), margin: { top: 1, right: 3 }, nonCapturing: true }),
+          overlayOptions: () => ({ anchor: "top-right", width: Math.max(1, state.width + 4), margin: { top: 1, right: 3 }, nonCapturing: true }),
         },
       )
       .catch(() => {})
