@@ -1,5 +1,5 @@
 import type { Api, Model, Usage } from "@earendil-works/pi-ai"
-import { calculateCost } from "@earendil-works/pi-ai/models"
+import { calculateCost } from "@earendil-works/pi-ai"
 
 export type Retention = "short" | "long"
 
