@@ -15,7 +15,7 @@ export interface CacheHit {
 
 export type CacheStatus =
   | { state: "none" }
-  | { state: "warm"; remainingMs: number }
+  | { state: "warm"; remainingMs: number; ttlMs: number }
   | { state: "cold"; expiredForMs?: number }
 
 type Entry = { type: string; timestamp?: string; [key: string]: any }
@@ -100,7 +100,7 @@ export function getCacheStatus(
   // Prompt caches are per model: a model change always starts cold.
   if (hit.provider !== model.provider || hit.model !== model.id) return { state: "cold" }
   const remainingMs = hit.at + ttl - now
-  return remainingMs > 0 ? { state: "warm", remainingMs } : { state: "cold", expiredForMs: -remainingMs }
+  return remainingMs > 0 ? { state: "warm", remainingMs, ttlMs: ttl } : { state: "cold", expiredForMs: -remainingMs }
 }
 
 function emptyUsage(): Usage {

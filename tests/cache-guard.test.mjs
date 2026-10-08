@@ -44,9 +44,9 @@ test("finds the last request that touched the cache", () => {
 
 test("derives warm, cold, and none from the model TTL", () => {
   const hit = { at: 0, provider: opus.provider, model: opus.id, promptTokens: 1, cached: true }
-  assert.deepEqual(getCacheStatus(opus, hit, "short", 60_000), { state: "warm", remainingMs: 240_000 })
+  assert.deepEqual(getCacheStatus(opus, hit, "short", 60_000), { state: "warm", remainingMs: 240_000, ttlMs: 300_000 })
   assert.deepEqual(getCacheStatus(opus, hit, "short", 400_000), { state: "cold", expiredForMs: 100_000 })
-  assert.deepEqual(getCacheStatus(opus, hit, "long", 400_000), { state: "warm", remainingMs: 3_200_000 })
+  assert.deepEqual(getCacheStatus(opus, hit, "long", 400_000), { state: "warm", remainingMs: 3_200_000, ttlMs: 3_600_000 })
   assert.deepEqual(getCacheStatus(haiku, hit, "short", 1), { state: "cold" })
   assert.deepEqual(getCacheStatus({ ...opus, promptCache: undefined }, { ...hit, cached: false }, "short", 1), { state: "none" })
   assert.deepEqual(getCacheStatus(opus, undefined, "short", 1), { state: "none" })
@@ -66,7 +66,7 @@ test("falls back to protocol lifetimes when the catalog has none (GitHub Copilot
   // The catalog always wins.
   assert.equal(resolveTtlMs({ ...copilotClaude, promptCache: { short: 60, long: 120 } }, "short", cached), 60_000)
   const hit = { at: 0, provider: "github-copilot", model: "claude-opus-4.8", promptTokens: 1, cached: true }
-  assert.deepEqual(getCacheStatus(copilotClaude, hit, "long", 600_000), { state: "warm", remainingMs: 3_000_000 })
+  assert.deepEqual(getCacheStatus(copilotClaude, hit, "long", 600_000), { state: "warm", remainingMs: 3_000_000, ttlMs: 3_600_000 })
 })
 
 test("prices cold and warm sends from the catalog", () => {

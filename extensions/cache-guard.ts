@@ -21,15 +21,24 @@ export * from "./cache-guard-logic.ts"
 const STATUS_KEY = "cache-guard"
 const WARN_BEFORE_EXPIRY_MS = 60_000
 
-const PLACEMENTS = ["above", "below", "footer", "off"] as const
+const PLACEMENTS = ["corner", "above", "below", "footer", "off"] as const
 type Placement = (typeof PLACEMENTS)[number]
-const DEFAULT_PLACEMENT: Placement = "above"
+const DEFAULT_PLACEMENT: Placement = "corner"
 const PLACEMENT_HELP: Record<Placement, string> = {
+  corner: "top right corner of the session",
   above: "above the editor",
   below: "below the editor",
   footer: "footer status line (can be hidden by long statuses)",
   off: "hidden",
 }
+const BAR_WIDTH = 10
+
+/** Progress bar of the remaining cache lifetime, for example `▰▰▰▰▰▰▱▱▱▱`. Returns the filled and empty parts. */
+function bar(remainingMs: number, ttlMs: number): { filled: string; empty: string } {
+  const filled = Math.max(0, Math.min(BAR_WIDTH, Math.ceil((remainingMs / ttlMs) * BAR_WIDTH)))
+  return { filled: "▰".repeat(filled), empty: "▱".repeat(BAR_WIDTH - filled) }
+}
+
 const isPlacement = (value: string): value is Placement => (PLACEMENTS as readonly string[]).includes(value)
 
 const settingsPath = () => join(getAgentDir(), "cache-guard.json")
@@ -68,9 +77,47 @@ export default function cacheGuardExtension(pi: ExtensionAPI) {
   let timer: ReturnType<typeof setInterval> | undefined
   let current: ExtensionContext | undefined
   let placement = loadPlacement()
+  type Corner = { text: string; width: number; close: () => void; tui?: { requestRender(): void } }
+  let corner: Corner | undefined
+
+  /** Top right overlay. It never takes keyboard focus; its width follows the text. */
+  const showCorner = (ctx: ExtensionContext, text: string | undefined, width: number) => {
+    if (corner) {
+      corner.text = text ?? ""
+      corner.width = width
+      corner.tui?.requestRender()
+      return
+    }
+    if (!text) return
+    const state: Corner = { text, width, close: () => {} }
+    corner = state
+    void ctx.ui
+      .custom<void>(
+        (tui, _theme, _kb, done) => {
+          state.tui = tui
+          state.close = () => done()
+          return { render: () => (state.text ? [state.text] : []), invalidate() {} }
+        },
+        {
+          overlay: true,
+          overlayOptions: () => ({ anchor: "top-right", width: Math.max(1, state.width), margin: { right: 1 }, nonCapturing: true }),
+        },
+      )
+      .catch(() => {})
+      .finally(() => {
+        if (corner === state) corner = undefined
+      })
+  }
+
+  const closeCorner = () => {
+    corner?.close()
+    corner = undefined
+  }
 
   /** Show `text` at the chosen place and clear every other place. */
-  const show = (ctx: ExtensionContext, text: string | undefined) => {
+  const show = (ctx: ExtensionContext, text: string | undefined, width = 0) => {
+    if (placement === "corner") showCorner(ctx, text, width)
+    else closeCorner()
     ctx.ui.setStatus(STATUS_KEY, placement === "footer" ? text : undefined)
     ctx.ui.setWidget(STATUS_KEY, placement === "above" && text ? [text] : undefined, { placement: "aboveEditor" })
     ctx.ui.setWidget(`${STATUS_KEY}-below`, placement === "below" && text ? [text] : undefined, { placement: "belowEditor" })
@@ -86,16 +133,22 @@ export default function cacheGuardExtension(pi: ExtensionAPI) {
     }
     const { theme } = ctx.ui
     if (state.status.state === "warm") {
-      const color = state.status.remainingMs < WARN_BEFORE_EXPIRY_MS ? "warning" : "dim"
-      show(ctx, theme.fg(color, `⏳ cache ${formatDuration(state.status.remainingMs)}`))
+      const { remainingMs, ttlMs } = state.status
+      const { filled, empty } = bar(remainingMs, ttlMs)
+      const time = formatDuration(remainingMs)
+      const color = remainingMs < WARN_BEFORE_EXPIRY_MS ? "warning" : "accent"
+      const label = "◷ cache "
+      const text = theme.fg(color, label + filled) + theme.fg("borderMuted", empty) + theme.fg(color, " " + time)
+      show(ctx, text, label.length + BAR_WIDTH + 1 + time.length)
       return
     }
-    const cost = state.tokens > 0 ? ` · next ~${formatUsd(coldCost(state.model, state.tokens, state.retention))}` : ""
-    show(ctx, theme.fg("dim", `❄ cache cold${cost}`))
+    const cost = state.tokens > 0 ? " · next ~" + formatUsd(coldCost(state.model, state.tokens, state.retention)) : ""
+    const plain = "❄ cache cold" + cost
+    show(ctx, theme.fg("dim", plain), [...plain].length)
   }
 
   pi.registerCommand("cache-guard", {
-    description: "Choose where the cache countdown is shown: above, below, footer, off",
+    description: "Choose where the cache countdown is shown: corner, above, below, footer, off",
     getArgumentCompletions: (prefix) => {
       const items = PLACEMENTS.filter((p) => p.startsWith(prefix.trim())).map((p) => ({ value: p, label: p, description: PLACEMENT_HELP[p] }))
       return items.length ? items : null
@@ -144,6 +197,7 @@ export default function cacheGuardExtension(pi: ExtensionAPI) {
   })
 
   pi.on("session_shutdown", () => {
+    closeCorner()
     if (timer) clearInterval(timer)
     timer = undefined
     current = undefined
