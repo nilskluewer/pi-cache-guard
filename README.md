@@ -7,7 +7,7 @@ Providers such as Anthropic keep a prompt cache for 5 minutes (or 1 hour with `P
 This extension:
 
 - shows a countdown with a progress bar above the editor: `◷ cache ▰▰▰▰▰▰▱▱▱▱ 4:32`, then `❄ cache cold · next ~$0.94`. Use the `/cache-guard` command to move it (`above`, `below`, `corner`, `footer`) or hide it (`off`). See [Placement](#placement).
-- asks before a message goes out on a cold cache, if the predicted cost is at least $0.10:
+- asks before a message goes out on a cold cache, if the predicted cost is above your budget (default $0.10; change it with `/cache-guard budget 0.50`, see [Budget](#budget)):
 
 ```text
 Prompt cache is cold (it expired 2 h ago). This message re-sends ~150k tokens: ~$0.94 instead of ~$0.08 with a warm cache.
@@ -48,6 +48,19 @@ export PI_CACHE_RETENTION=long   # for example in ~/.zshrc
 
 Cache writes cost more with the 1-hour lifetime. The countdown and the predicted costs follow this setting. Pi documents this variable in its environment variables docs.
 
+## Budget
+
+A cold cache costing a few cents is fine for many people. A cold cache costing several dollars is not. The budget is the most a cold-cache send may cost before the extension asks.
+
+```text
+/cache-guard budget 0.50   ask only when a cold send costs more than $0.50
+/cache-guard budget 0      always ask
+/cache-guard budget        pick from a list, or enter your own amount
+/cache-guard               settings menu (budget and placement)
+```
+
+Amounts are in US dollars, because Pi's model prices are in US dollars. The default is $0.10. A saved budget replaces the `PI_CACHE_GUARD_MIN_USD` environment variable, which stays as a fallback default.
+
 ## Placement
 
 The countdown is shown above the editor by default. The bar uses Pi's accent colour and turns to the warning colour in the last minute. The footer status line can be hidden by long statuses from other extensions. Change the place with:
@@ -61,13 +74,13 @@ The countdown is shown above the editor by default. The bar uses Pi's accent col
 /cache-guard off        hidden
 ```
 
-The choice is saved in `~/.pi/agent/cache-guard.json`.
+The choice and the budget are saved in `~/.pi/agent/cache-guard.json`.
 
 ## Configuration
 
 | Environment variable | Default | Effect |
 |---|---|---|
-| `PI_CACHE_GUARD_MIN_USD` | `0.1` | Ask only when a cold send costs at least this amount. `0` always asks. |
+| `PI_CACHE_GUARD_MIN_USD` | `0.1` | Default budget: ask only when a cold send costs more than this amount. `0` always asks. A budget set with `/cache-guard budget` takes priority. |
 | `PI_CACHE_RETENTION` | – | Pi's own setting. `long` uses the 1-hour cache lifetime and price. |
 
 ## Behavior

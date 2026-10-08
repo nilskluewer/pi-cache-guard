@@ -13,6 +13,7 @@ import {
   formatUsd,
   getCacheStatus,
   getRetention,
+  parseUsd,
   warmCost,
 } from "./cache-guard-logic.ts"
 
@@ -57,25 +58,38 @@ const isPlacement = (value: string): value is Placement => (PLACEMENTS as readon
 
 const settingsPath = () => join(getAgentDir(), "cache-guard.json")
 
-function loadPlacement(): Placement {
+type Settings = { placement?: Placement; budgetUsd?: number }
+
+function loadSettings(): Settings {
   try {
-    if (existsSync(settingsPath())) {
-      const value = JSON.parse(readFileSync(settingsPath(), "utf8"))?.placement
-      if (typeof value === "string" && isPlacement(value)) return value
-    }
-  } catch {}
-  return DEFAULT_PLACEMENT
+    if (!existsSync(settingsPath())) return {}
+    const raw = JSON.parse(readFileSync(settingsPath(), "utf8"))
+    const settings: Settings = {}
+    if (typeof raw?.placement === "string" && isPlacement(raw.placement)) settings.placement = raw.placement
+    if (typeof raw?.budgetUsd === "number" && Number.isFinite(raw.budgetUsd) && raw.budgetUsd >= 0) settings.budgetUsd = raw.budgetUsd
+    return settings
+  } catch {
+    return {}
+  }
 }
 
-function savePlacement(placement: Placement) {
-  writeFileSync(settingsPath(), JSON.stringify({ placement }, null, 2) + "\n")
+function saveSettings(update: Settings) {
+  writeFileSync(settingsPath(), JSON.stringify({ ...loadSettings(), ...update }, null, 2) + "\n")
 }
 
-/** Ask before a cold send that costs at least this much. Override with PI_CACHE_GUARD_MIN_USD. */
-function minUsd(): number {
-  const value = Number(process.env.PI_CACHE_GUARD_MIN_USD)
-  return Number.isFinite(value) && value >= 0 ? value : 0.1
+const DEFAULT_BUDGET_USD = 0.1
+const BUDGET_PRESETS = [0.05, 0.1, 0.25, 0.5, 1, 2, 5]
+
+/** Budget: saved setting, then PI_CACHE_GUARD_MIN_USD, then $0.10. A cold send up to the budget goes out without asking. */
+function loadBudget(): number {
+  const saved = loadSettings().budgetUsd
+  if (saved !== undefined) return saved
+  const env = process.env.PI_CACHE_GUARD_MIN_USD
+  const value = env === undefined || env.trim() === "" ? NaN : Number(env)
+  return Number.isFinite(value) && value >= 0 ? value : DEFAULT_BUDGET_USD
 }
+
+const describeBudget = (usd: number) => (usd === 0 ? "always ask" : `ask above ${formatUsd(usd)}`)
 
 function inspect(ctx: ExtensionContext) {
   const model = ctx.model
@@ -90,7 +104,8 @@ function inspect(ctx: ExtensionContext) {
 export default function cacheGuardExtension(pi: ExtensionAPI) {
   let timer: ReturnType<typeof setInterval> | undefined
   let current: ExtensionContext | undefined
-  let placement = loadPlacement()
+  let placement = loadSettings().placement ?? DEFAULT_PLACEMENT
+  let budget = loadBudget()
   type Corner = { text: string; width: number; close: () => void; tui?: { requestRender(): void } }
   let corner: Corner | undefined
 
@@ -161,33 +176,96 @@ export default function cacheGuardExtension(pi: ExtensionAPI) {
     show(ctx, theme.fg("error", plain), [...plain].length)
   }
 
+  const save = (ctx: ExtensionContext, update: Settings) => {
+    try {
+      saveSettings(update)
+    } catch {
+      ctx.ui.notify("Could not save the setting. It applies to this session only.", "warning")
+    }
+  }
+
+  const setPlacement = (ctx: ExtensionContext, choice: Placement) => {
+    placement = choice
+    save(ctx, { placement: choice })
+    current = ctx
+    refreshStatus()
+    ctx.ui.notify(`Cache countdown: ${PLACEMENT_HELP[choice]}.`, "info")
+  }
+
+  const setBudget = (ctx: ExtensionContext, usd: number) => {
+    budget = usd
+    save(ctx, { budgetUsd: usd })
+    ctx.ui.notify(
+      usd === 0
+        ? "Cache budget: $0. Every cold-cache send asks first."
+        : `Cache budget: ${formatUsd(usd)}. A cold-cache send up to this cost goes out without asking.`,
+      "info",
+    )
+  }
+
+  const pickPlacement = async (ctx: ExtensionContext) => {
+    const options = PLACEMENTS.map((p) => `${p} · ${PLACEMENT_HELP[p]}${p === placement ? " (current)" : ""}`)
+    const picked = await ctx.ui.select("Cache countdown placement", options)
+    const choice = picked?.split(" ", 1)[0]
+    if (choice && isPlacement(choice)) setPlacement(ctx, choice)
+  }
+
+  const pickBudget = async (ctx: ExtensionContext) => {
+    const amounts = [0, ...BUDGET_PRESETS]
+    const label = (usd: number) => (usd === 0 ? "Always ask ($0)" : formatUsd(usd))
+    const options = amounts.map((usd) => label(usd) + (usd === budget ? " (current)" : ""))
+    const custom = "Custom amount…"
+    const picked = await ctx.ui.select(`Cache budget: ask before a cold send above this cost (now ${describeBudget(budget)})`, [...options, custom])
+    if (!picked) return
+    if (picked === custom) {
+      const typed = await ctx.ui.input("Budget in USD", "for example 0.50")
+      if (typed === undefined) return
+      const usd = parseUsd(typed)
+      if (usd === undefined) ctx.ui.notify(`"${typed}" is not a valid amount.`, "error")
+      else setBudget(ctx, usd)
+      return
+    }
+    const usd = amounts[options.indexOf(picked)]
+    if (usd !== undefined) setBudget(ctx, usd)
+  }
+
   pi.registerCommand("cache-guard", {
-    description: "Choose where the cache countdown is shown: corner, above, below, footer, off",
+    description: "Cache guard settings: budget <usd> | above, below, corner, footer, off",
     getArgumentCompletions: (prefix) => {
-      const items = PLACEMENTS.filter((p) => p.startsWith(prefix.trim())).map((p) => ({ value: p, label: p, description: PLACEMENT_HELP[p] }))
+      const [first = "", second] = prefix.trimStart().split(/\s+/, 2)
+      if (second !== undefined || /\s$/.test(prefix)) {
+        if (first !== "budget") return null
+        const typed = (second ?? "").toLowerCase()
+        const items = [0, ...BUDGET_PRESETS]
+          .map((usd) => ({ value: `budget ${usd}`, label: String(usd), description: describeBudget(usd) }))
+          .filter((item) => item.label.startsWith(typed))
+        return items.length ? items : null
+      }
+      const items = [
+        { value: "budget", label: "budget", description: `cost limit before asking (now ${describeBudget(budget)})` },
+        ...PLACEMENTS.map((p) => ({ value: p, label: p, description: PLACEMENT_HELP[p] })),
+      ].filter((item) => item.label.startsWith(first))
       return items.length ? items : null
     },
     handler: async (args, ctx) => {
-      let choice = args.trim()
-      if (!choice) {
-        const options = PLACEMENTS.map((p) => `${p} · ${PLACEMENT_HELP[p]}${p === placement ? " (current)" : ""}`)
-        const picked = await ctx.ui.select("Cache countdown placement", options)
-        choice = picked?.split(" ", 1)[0] ?? ""
-        if (!choice) return
-      }
-      if (!isPlacement(choice)) {
-        ctx.ui.notify(`Unknown placement "${choice}". Use: ${PLACEMENTS.join(", ")}.`, "error")
+      const [first = "", ...rest] = args.trim().split(/\s+/)
+      if (!first) {
+        const placementItem = `Placement · ${PLACEMENT_HELP[placement]}`
+        const budgetItem = `Budget · ${describeBudget(budget)}`
+        const picked = await ctx.ui.select("Cache guard settings", [budgetItem, placementItem])
+        if (picked === budgetItem) await pickBudget(ctx)
+        else if (picked === placementItem) await pickPlacement(ctx)
         return
       }
-      placement = choice
-      try {
-        savePlacement(choice)
-      } catch {
-        ctx.ui.notify("Could not save the setting. It applies to this session only.", "warning")
+      if (first === "budget") {
+        if (rest.length === 0) return pickBudget(ctx)
+        const usd = parseUsd(rest.join(" "))
+        if (usd === undefined) ctx.ui.notify(`"${rest.join(" ")}" is not a valid amount. Example: /cache-guard budget 0.50`, "error")
+        else setBudget(ctx, usd)
+        return
       }
-      current = ctx
-      refreshStatus()
-      ctx.ui.notify(`Cache countdown: ${PLACEMENT_HELP[choice]}.`, "info")
+      if (isPlacement(first)) return setPlacement(ctx, first)
+      ctx.ui.notify(`Unknown option "${first}". Use: budget <usd>, ${PLACEMENTS.join(", ")}.`, "error")
     },
   })
 
@@ -230,7 +308,7 @@ export default function cacheGuardExtension(pi: ExtensionAPI) {
     if (!state || state.status.state !== "cold" || state.tokens <= 0) return { action: "continue" as const }
     const { model, retention, tokens, status } = state
     const cost = coldCost(model, tokens, retention)
-    if (cost < minUsd()) return { action: "continue" as const }
+    if (cost <= budget) return { action: "continue" as const }
 
     const reason =
       status.expiredForMs === undefined ? "the model changed" : `it expired ${formatAgo(status.expiredForMs)}`

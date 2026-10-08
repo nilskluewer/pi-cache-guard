@@ -155,6 +155,14 @@ export function formatUsd(value: number): string {
   return value < 0.01 ? "<$0.01" : `$${value.toFixed(2)}`
 }
 
+/** Parse a budget such as "0.5", "$0.50", "€1" or "0,25". Returns undefined when it is not a non-negative number. */
+export function parseUsd(input: string): number | undefined {
+  const text = input.trim().replace(/^[$€]\s*/, "").replace(/\s*[$€]$/, "").replace(",", ".")
+  if (!/^\d*\.?\d+$|^\d+\.$/.test(text)) return undefined
+  const value = Number(text)
+  return Number.isFinite(value) && value >= 0 ? value : undefined
+}
+
 export function formatTokens(tokens: number): string {
   return tokens >= 1000 ? `${Math.round(tokens / 1000)}k` : String(tokens)
 }
