@@ -79,13 +79,15 @@ test("prices cold and warm sends from the catalog", () => {
   assert.equal(coldCost(tiered, 1_000_000, "short").toFixed(2), "12.50")
 })
 
-test("offers cheaper same-provider models that fit, one per price", () => {
+test("offers only supplied scoped models, including equal-price and cross-provider models", () => {
   const all = [opus, sonnetOld, sonnet, haiku, otherProvider]
-  assert.deepEqual(cheaperModels(opus, all, 100_000, "short").map((x) => x.model.id), ["claude-sonnet-5", "claude-haiku-4-5"])
-  assert.deepEqual(cheaperModels(opus, all, 300_000, "short").map((x) => x.model.id), ["claude-sonnet-5"])
+  assert.deepEqual(cheaperModels(opus, all, 100_000, "short").map((x) => x.model.id), ["claude-sonnet-4-5", "claude-sonnet-5", "claude-haiku-4-5", "gpt-mini"])
+  assert.deepEqual(cheaperModels(opus, all, 300_000, "short").map((x) => x.model.id), ["claude-sonnet-4-5", "claude-sonnet-5"])
   assert.deepEqual(cheaperModels(haiku, all, 100_000, "short"), [])
   const levels = [5, 4, 3, 2, 1].map((p) => ({ ...opus, id: `m${p}`, cost: { ...opus.cost, cacheWrite: p } }))
-  assert.deepEqual(cheaperModels(opus, levels, 1_000, "short", 3).map((x) => x.model.id), ["m5", "m4", "m1"])
+  assert.deepEqual(cheaperModels(opus, levels, 1_000, "short").map((x) => x.model.id), ["m5", "m4", "m3", "m2", "m1"])
+  assert.deepEqual(cheaperModels(opus, [], 100_000, "short"), [])
+  assert.deepEqual(cheaperModels(opus, [haiku], 100_000, "short").map((x) => x.model.id), [haiku.id])
 })
 
 test("formats values and reads retention", () => {

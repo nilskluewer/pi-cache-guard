@@ -104,8 +104,8 @@ export default function cacheGuardExtension(pi: ExtensionAPI) {
 
     const send = `Send with ${model.name} · ~${formatUsd(cost)}`
     const alternatives = new Map(
-      cheaperModels(model, ctx.modelRegistry.getAvailable(), tokens, retention).map((alt) => [
-        `Switch to ${alt.model.name} · ~${formatUsd(alt.cost)}`,
+      cheaperModels(model, ctx.scopedModels.map((entry) => entry.model), tokens, retention).map((alt) => [
+        `Switch to ${alt.model.provider}/${alt.model.id} · ~${formatUsd(alt.cost)}`,
         alt.model,
       ]),
     )
@@ -116,7 +116,11 @@ export default function cacheGuardExtension(pi: ExtensionAPI) {
 
     const alternative = choice ? alternatives.get(choice) : undefined
     if (alternative) {
-      if (await pi.setModel(alternative)) return { action: "continue" as const }
+      if (await pi.setModel(alternative)) {
+        const scoped = ctx.scopedModels.find((entry) => entry.model.provider === alternative.provider && entry.model.id === alternative.id)
+        if (scoped?.thinkingLevel) pi.setThinkingLevel(scoped.thinkingLevel)
+        return { action: "continue" as const }
+      }
       ctx.ui.notify(`Could not switch to ${alternative.name}.`, "error")
     }
     ctx.ui.setEditorText(event.text)

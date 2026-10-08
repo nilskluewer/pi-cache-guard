@@ -12,8 +12,8 @@ This extension:
 ```text
 Prompt cache is cold (it expired 2 h ago). This message re-sends ~150k tokens: ~$0.94 instead of ~$0.08 with a warm cache.
 > Send with Claude Opus 4.8 · ~$0.94
-  Switch to Claude Sonnet 5 · ~$0.56
-  Switch to Claude Haiku 4.5 · ~$0.19   ← the cheapest level is always shown
+  Switch to anthropic-vertex/claude-sonnet-5 · ~$0.56
+  Switch to anthropic-vertex/claude-haiku-4-5 · ~$0.19
   Cancel (keep text in editor)
 ```
 
@@ -51,7 +51,7 @@ Run `/reload` in an existing Pi session.
 - A model change always starts with a cold cache.
 - After a compaction the prompt is new, so the extension does not ask.
 - Only interactive input is checked. Slash commands and `!` shell commands are ignored; prompt templates and skills are checked.
-- The switch options are cheaper models of the same provider that fit the current context, one per price level: the closest cheaper levels and always the cheapest one (at most 4).
+- Switch options come only from the session's `/scoped-models`, including models from other providers. All cheaper scoped models that fit the context are shown; there is no catalog fallback or price-level substitution. The scoped thinking level is applied on switching. If no models are scoped, only Send and Cancel are offered.
 
 ## Test
 

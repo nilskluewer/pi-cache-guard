@@ -136,31 +136,19 @@ export function warmCost(model: Model<Api>, tokens: number): number {
   return calculateCost(model, usage).total
 }
 
-/**
- * Up to `limit` cheaper models of the same provider that fit the context,
- * one per price level: the closest cheaper levels plus always the cheapest.
- */
+/** All cheaper scoped models that fit the context, without catalog substitutions. */
 export function cheaperModels(
   current: Model<Api>,
-  available: readonly Model<Api>[],
+  scoped: readonly Model<Api>[],
   tokens: number,
   retention: Retention,
-  limit = 4,
 ): { model: Model<Api>; cost: number }[] {
   const currentCost = coldCost(current, tokens, retention)
-  const byPrice = new Map<string, { model: Model<Api>; cost: number }>()
-  for (const model of available) {
-    if (model.provider !== current.provider || model.id === current.id) continue
-    if (model.contextWindow < tokens) continue
-    const cost = coldCost(model, tokens, retention)
-    if (cost >= currentCost) continue
-    const key = cost.toFixed(6)
-    const previous = byPrice.get(key)
-    // Within one price level, prefer the newest ID (catalog IDs sort by version).
-    if (!previous || model.id > previous.model.id) byPrice.set(key, { model, cost })
-  }
-  const sorted = [...byPrice.values()].sort((a, b) => b.cost - a.cost)
-  return sorted.length <= limit ? sorted : [...sorted.slice(0, limit - 1), sorted[sorted.length - 1]]
+  return scoped
+    .filter((model) => !(model.provider === current.provider && model.id === current.id) && model.contextWindow >= tokens)
+    .map((model) => ({ model, cost: coldCost(model, tokens, retention) }))
+    .filter((entry) => entry.cost < currentCost)
+    .sort((a, b) => b.cost - a.cost)
 }
 
 export function formatUsd(value: number): string {
