@@ -100,7 +100,7 @@ export default function cacheGuardExtension(pi: ExtensionAPI) {
         },
         {
           overlay: true,
-          overlayOptions: () => ({ anchor: "top-right", width: Math.max(1, state.width), margin: { right: 1 }, nonCapturing: true }),
+          overlayOptions: () => ({ anchor: "top-right", width: Math.max(1, state.width), margin: { top: 1, right: 3 }, nonCapturing: true }),
         },
       )
       .catch(() => {})
