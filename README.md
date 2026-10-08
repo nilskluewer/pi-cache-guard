@@ -46,7 +46,7 @@ By default the cache lives 5 minutes, so the countdown is short. To get 1 hour o
 export PI_CACHE_RETENTION=long   # for example in ~/.zshrc
 ```
 
-Cache writes cost more with the 1-hour lifetime. The countdown and the predicted costs follow this setting. See Pi's [environment variables](https://pi.dev/docs/latest/environment-variables) page.
+Cache writes cost more with the 1-hour lifetime. The countdown and the predicted costs follow this setting. Pi documents this variable in its environment variables docs.
 
 ## Placement
 
