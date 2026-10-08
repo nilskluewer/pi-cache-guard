@@ -38,8 +38,13 @@ const border = (s: string) => "\x1b[38;2;39;59;72m" + s + "\x1b[39m"
 
 /** Draw text (visible width `width`) in a rounded box. */
 function box(text: string, width: number): string[] {
-  const line = "━".repeat(width + 2)
-  return [border("┏" + line + "┓"), border("┃") + " " + text + " " + border("┃"), border("┗" + line + "┛")]
+  // Block characters sit flush with the cell edge; line-drawing glyphs sit mid-cell and leave a visible gap.
+  const inner = width + 2
+  return [
+    border("▛" + "▀".repeat(inner) + "▜"),
+    border("▌") + " " + text + " " + border("▐"),
+    border("▙" + "▄".repeat(inner) + "▟"),
+  ]
 }
 
 /** Progress bar of the remaining cache lifetime, for example `▰▰▰▰▰▰▱▱▱▱`. Returns the filled and empty parts. */
