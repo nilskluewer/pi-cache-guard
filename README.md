@@ -58,3 +58,7 @@ Run `/reload` in an existing Pi session.
 ```bash
 npm test
 ```
+
+## License
+
+MIT
