@@ -11,6 +11,7 @@ test("dialog reads live scope, never the catalog, and applies scoped thinking", 
   let chosen, thinking, options
   extension({
     on: (name, fn) => handlers.set(name, fn),
+    registerCommand: () => {},
     getCommands: () => [],
     setModel: async (m) => { chosen = m; return true },
     setThinkingLevel: (level) => { thinking = level },
