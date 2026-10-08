@@ -38,6 +38,16 @@ pi install npm:@nilskluewer/pi-cache-guard
 
 Run `/reload` in an existing Pi session.
 
+## Longer cache lifetime
+
+By default the cache lives 5 minutes, so the countdown is short. To get 1 hour on Anthropic models, start Pi with Pi's own setting:
+
+```bash
+export PI_CACHE_RETENTION=long   # for example in ~/.zshrc
+```
+
+Cache writes cost more with the 1-hour lifetime. The countdown and the predicted costs follow this setting. See Pi's [environment variables](https://pi.dev/docs/latest/environment-variables) page.
+
 ## Placement
 
 The countdown is shown in the top right corner of the session by default, as a non-focusable overlay. The bar uses Pi's accent colour and turns to the warning colour in the last minute. The footer status line can be hidden by long statuses from other extensions. Change the place with:
