@@ -1,6 +1,6 @@
 {
   "name": "@nilskluewer/pi-cache-guard",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Pi extension that shows a prompt-cache countdown and asks before a message re-writes an expired cache, with predicted cost and cheaper model options.",
   "type": "module",
   "keywords": [
