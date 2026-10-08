@@ -144,7 +144,7 @@ export default function cacheGuardExtension(pi: ExtensionAPI) {
     }
     const cost = state.tokens > 0 ? " · next ~" + formatUsd(coldCost(state.model, state.tokens, state.retention)) : ""
     const plain = "❄ cache cold" + cost
-    show(ctx, theme.fg("dim", plain), [...plain].length)
+    show(ctx, theme.fg("error", plain), [...plain].length)
   }
 
   pi.registerCommand("cache-guard", {
