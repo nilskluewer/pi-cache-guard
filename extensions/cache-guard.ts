@@ -23,7 +23,7 @@ const WARN_BEFORE_EXPIRY_MS = 60_000
 
 const PLACEMENTS = ["corner", "above", "below", "footer", "off"] as const
 type Placement = (typeof PLACEMENTS)[number]
-const DEFAULT_PLACEMENT: Placement = "corner"
+const DEFAULT_PLACEMENT: Placement = "above"
 const PLACEMENT_HELP: Record<Placement, string> = {
   corner: "top right corner of the session",
   above: "above the editor",

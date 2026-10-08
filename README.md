@@ -6,7 +6,7 @@ Providers such as Anthropic keep a prompt cache for 5 minutes (or 1 hour with `P
 
 This extension:
 
-- shows a countdown with a progress bar in the top right corner (placement is configurable): `◷ cache ▰▰▰▰▰▰▱▱▱▱ 4:32`, then `❄ cache cold · next ~$0.94`
+- shows a countdown with a progress bar above the editor: `◷ cache ▰▰▰▰▰▰▱▱▱▱ 4:32`, then `❄ cache cold · next ~$0.94`. Use the `/cache-guard` command to move it (`above`, `below`, `corner`, `footer`) or hide it (`off`). See [Placement](#placement).
 - asks before a message goes out on a cold cache, if the predicted cost is at least $0.10:
 
 ```text
@@ -50,12 +50,12 @@ Cache writes cost more with the 1-hour lifetime. The countdown and the predicted
 
 ## Placement
 
-The countdown is shown in the top right corner of the session by default, as a non-focusable overlay. The bar uses Pi's accent colour and turns to the warning colour in the last minute. The footer status line can be hidden by long statuses from other extensions. Change the place with:
+The countdown is shown above the editor by default. The bar uses Pi's accent colour and turns to the warning colour in the last minute. The footer status line can be hidden by long statuses from other extensions. Change the place with:
 
 ```text
 /cache-guard            pick from a list
-/cache-guard corner     top right corner (default)
-/cache-guard above      above the editor
+/cache-guard above      above the editor (default)
+/cache-guard corner     top right corner, as a boxed overlay
 /cache-guard below      below the editor
 /cache-guard footer     footer status line
 /cache-guard off        hidden
