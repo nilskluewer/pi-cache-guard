@@ -61,6 +61,25 @@ A cold cache costing a few cents is fine for many people. A cold cache costing s
 
 Amounts are in US dollars, because Pi's model prices are in US dollars. The default is $0.10. A saved budget replaces the `PI_CACHE_GUARD_MIN_USD` environment variable, which stays as a fallback default.
 
+## Automatic handoff scheduling
+
+Automatic handoff is **off by default**. Enable it only if you want Pi to spend money on one visible handoff turn in a costly session:
+
+```text
+/cache-guard handoff on              enable automatic generation
+/cache-guard handoff off             disable automatic generation (default)
+/cache-guard handoff threshold 10    require recorded session total > $10 (default)
+/cache-guard handoff                 settings menu: on/off and threshold
+```
+
+The threshold accepts finite, nonnegative USD amounts. It is separate from the cold-send budget. The total includes all recorded costs in the current session, including abandoned branches, tools, compactions, branch summaries, and cache refreshes. It does not read parent sessions or reconstruct missing usage as billed cost.
+
+In an interactive terminal session, the extension checks once per second. It starts at the first eligible check with **more than zero and at most 60 seconds** of estimated cache lifetime left, only when Pi is idle and has no pending messages. It uses the current model, the normal tools, and the original handoff prompt. It does not compact, change models, or switch sessions. The generated document is verified and copied to an agent-owned `handoffs` directory outside the workspace, with source-session metadata.
+
+Generation, output, and tool follow-up requests still incur costs. The 60-second lead does not guarantee a warm-cache hit or completion before expiry. If Pi is busy through the warm window, closed, or asleep until the cache is cold, there is **no automatic cold-cache catch-up**. Hiding the countdown with `/cache-guard off` does not disable enabled scheduling.
+
+There is at most one automatic dispatch attempt per session, including failed attempts. The guard survives cache refreshes, further work, branch changes, reloads, and resumes. Failures are reported without an automatic retry. The enabled flag and threshold are saved with the budget and placement in `~/.pi/agent/cache-guard.json`.
+
 ## Placement
 
 The countdown is shown above the editor by default. The bar uses Pi's accent colour and turns to the warning colour in the last minute. The footer status line can be hidden by long statuses from other extensions. Change the place with:
