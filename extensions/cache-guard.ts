@@ -18,6 +18,7 @@ import {
 } from "./cache-guard-logic.ts"
 
 import { createHandoffService, type HandoffOptions } from "./handoff.ts"
+import { createHandoffChooser } from "./handoff-choice.ts"
 
 export * from "./cache-guard-logic.ts"
 
@@ -105,6 +106,7 @@ function inspect(ctx: ExtensionContext) {
 
 export default function cacheGuardExtension(pi: ExtensionAPI, options: { handoff?: HandoffOptions } = {}) {
   const handoff = createHandoffService(pi, options.handoff)
+  const chooser = createHandoffChooser(pi, handoff, options.handoff?.agentDir)
   let timer: ReturnType<typeof setInterval> | undefined
   let current: ExtensionContext | undefined
   let placement = loadSettings().placement ?? DEFAULT_PLACEMENT
@@ -307,11 +309,13 @@ export default function cacheGuardExtension(pi: ExtensionAPI, options: { handoff
     if (event.source !== "interactive" || event.streamingBehavior || !ctx.hasUI) return { action: "continue" as const }
     if (!reachesModel(event.text)) return { action: "continue" as const }
 
+    const pending = chooser.prepare(event, ctx)
+    const proceed = () => chooser.continue(event, pending, ctx)
     const state = inspect(ctx)
-    if (!state || state.status.state !== "cold" || state.tokens <= 0) return { action: "continue" as const }
+    if (!state || state.status.state !== "cold" || state.tokens <= 0) return proceed()
     const { model, retention, tokens, status } = state
     const cost = coldCost(model, tokens, retention)
-    if (cost <= budget) return { action: "continue" as const }
+    if (cost <= budget) return proceed()
 
     const reason =
       status.expiredForMs === undefined ? "the model changed" : `it expired ${formatAgo(status.expiredForMs)}`
@@ -319,7 +323,8 @@ export default function cacheGuardExtension(pi: ExtensionAPI, options: { handoff
       `Prompt cache is cold (${reason}). This message re-sends ~${formatTokens(tokens)} tokens: ` +
       `~${formatUsd(cost)} instead of ~${formatUsd(warmCost(model, tokens))} with a warm cache.`
 
-    const send = `Send with ${model.name} · ~${formatUsd(cost)}`
+    const saved = chooser.offer(ctx)
+    const send = `Continue with ${model.name} · estimated prompt/cache cost ~${formatUsd(cost)}`
     const alternatives = new Map(
       cheaperModels(model, ctx.scopedModels.map((entry) => entry.model), tokens, retention).map((alt) => [
         `Switch to ${alt.model.provider}/${alt.model.id} · ~${formatUsd(alt.cost)}`,
@@ -328,19 +333,31 @@ export default function cacheGuardExtension(pi: ExtensionAPI, options: { handoff
     )
     const cancel = "Cancel (keep text in editor)"
 
-    const choice = await ctx.ui.select(title, [send, ...alternatives.keys(), cancel])
-    if (choice === send) return { action: "continue" as const }
+    let choice: string | undefined
+    try {
+      choice = await ctx.ui.select(title, [...(saved ? [saved.label] : []), send, ...alternatives.keys(), cancel])
+    } catch {
+      chooser.cancel(ctx, pending)
+      return { action: "handled" as const }
+    }
+    if (choice === send) return proceed()
+    if (saved && choice === saved.label) {
+      chooser.replace(ctx, pending, saved.artifact)
+      return { action: "handled" as const }
+    }
 
     const alternative = choice ? alternatives.get(choice) : undefined
     if (alternative) {
-      if (await pi.setModel(alternative)) {
-        const scoped = ctx.scopedModels.find((entry) => entry.model.provider === alternative.provider && entry.model.id === alternative.id)
-        if (scoped?.thinkingLevel) pi.setThinkingLevel(scoped.thinkingLevel)
-        return { action: "continue" as const }
-      }
+      try {
+        if (await pi.setModel(alternative)) {
+          const scoped = ctx.scopedModels.find((entry) => entry.model.provider === alternative.provider && entry.model.id === alternative.id)
+          if (scoped?.thinkingLevel) pi.setThinkingLevel(scoped.thinkingLevel)
+          return proceed()
+        }
+      } catch { /* Preserve the pending request on a failed model switch too. */ }
       ctx.ui.notify(`Could not switch to ${alternative.name}.`, "error")
     }
-    ctx.ui.setEditorText(event.text)
+    chooser.cancel(ctx, pending)
     return { action: "handled" as const }
   })
 
