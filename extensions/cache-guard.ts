@@ -18,6 +18,7 @@ import {
 } from "./cache-guard-logic.ts"
 
 import { createHandoffService, type HandoffOptions } from "./handoff.ts"
+import { sessionCostUsd } from "./handoff-scheduling.ts"
 
 export * from "./cache-guard-logic.ts"
 
@@ -60,7 +61,7 @@ const isPlacement = (value: string): value is Placement => (PLACEMENTS as readon
 
 const settingsPath = () => join(getAgentDir(), "cache-guard.json")
 
-type Settings = { placement?: Placement; budgetUsd?: number }
+type Settings = { placement?: Placement; budgetUsd?: number; autoHandoff?: boolean; handoffThresholdUsd?: number }
 
 function loadSettings(): Settings {
   try {
@@ -69,6 +70,10 @@ function loadSettings(): Settings {
     const settings: Settings = {}
     if (typeof raw?.placement === "string" && isPlacement(raw.placement)) settings.placement = raw.placement
     if (typeof raw?.budgetUsd === "number" && Number.isFinite(raw.budgetUsd) && raw.budgetUsd >= 0) settings.budgetUsd = raw.budgetUsd
+    if (typeof raw?.autoHandoff === "boolean") settings.autoHandoff = raw.autoHandoff
+    if (typeof raw?.handoffThresholdUsd === "number" && Number.isFinite(raw.handoffThresholdUsd) && raw.handoffThresholdUsd >= 0) {
+      settings.handoffThresholdUsd = raw.handoffThresholdUsd
+    }
     return settings
   } catch {
     return {}
@@ -79,6 +84,7 @@ function saveSettings(update: Settings) {
   writeFileSync(settingsPath(), JSON.stringify({ ...loadSettings(), ...update }, null, 2) + "\n")
 }
 
+const DEFAULT_HANDOFF_THRESHOLD_USD = 10
 const DEFAULT_BUDGET_USD = 0.1
 const BUDGET_PRESETS = [0.05, 0.1, 0.25, 0.5, 1, 2, 5]
 
@@ -109,6 +115,9 @@ export default function cacheGuardExtension(pi: ExtensionAPI, options: { handoff
   let current: ExtensionContext | undefined
   let placement = loadSettings().placement ?? DEFAULT_PLACEMENT
   let budget = loadBudget()
+  let autoHandoff = loadSettings().autoHandoff ?? false
+  let handoffThreshold = loadSettings().handoffThresholdUsd ?? DEFAULT_HANDOFF_THRESHOLD_USD
+  let sessionId: string | undefined
   type Corner = { text: string; width: number; close: () => void; tui?: { requestRender(): void } }
   let corner: Corner | undefined
 
@@ -179,6 +188,32 @@ export default function cacheGuardExtension(pi: ExtensionAPI, options: { handoff
     show(ctx, theme.fg("error", plain), [...plain].length)
   }
 
+  /** No queued deadline job: each tick uses current policy and cache state, never a cold catch-up.
+   * This path is synchronous through start(), which persists the sole lifetime dispatch guard. */
+  const scheduleHandoff = () => {
+    const ctx = current
+    if (!ctx || ctx.mode !== "tui" || !autoHandoff || ctx.sessionManager.getSessionId() !== sessionId) return
+    const observed = inspect(ctx)
+    if (!observed || observed.status.state !== "warm" || observed.status.remainingMs > WARN_BEFORE_EXPIRY_MS) return
+    const leaf = ctx.sessionManager.getLeafId()
+    if (handoff.getState(ctx) || sessionCostUsd(ctx.sessionManager.getEntries()) <= handoffThreshold) return
+    if (!ctx.isIdle() || ctx.hasPendingMessages()) return
+
+    // Re-read after eligibility checks. A lifecycle/model/branch change must not use the old observation.
+    const latest = inspect(ctx)
+    if (current !== ctx || !autoHandoff || ctx.sessionManager.getSessionId() !== sessionId ||
+        ctx.sessionManager.getLeafId() !== leaf || !latest || latest.model.provider !== observed.model.provider ||
+        latest.model.id !== observed.model.id || latest.retention !== observed.retention || latest.hit?.at !== observed.hit?.at ||
+        latest.status.state !== "warm" || latest.status.remainingMs > WARN_BEFORE_EXPIRY_MS ||
+        sessionCostUsd(ctx.sessionManager.getEntries()) <= handoffThreshold) return
+    handoff.start(ctx) // Rechecks idle/pending and the session-wide guard immediately before dispatch.
+  }
+
+  const tick = () => {
+    scheduleHandoff()
+    refreshStatus()
+  }
+
   const save = (ctx: ExtensionContext, update: Settings) => {
     try {
       saveSettings(update)
@@ -204,6 +239,40 @@ export default function cacheGuardExtension(pi: ExtensionAPI, options: { handoff
         : `Cache budget: ${formatUsd(usd)}. A cold-cache send up to this cost goes out without asking.`,
       "info",
     )
+  }
+
+  const describeHandoff = () => `${autoHandoff ? "on" : "off"} · session total > ${formatUsd(handoffThreshold)}`
+
+  const setHandoff = (ctx: ExtensionContext, enabled: boolean) => {
+    autoHandoff = enabled
+    save(ctx, { autoHandoff: enabled })
+    ctx.ui.notify(enabled
+      ? `Automatic handoff: on above ${formatUsd(handoffThreshold)} recorded session cost. Runs once near cache expiry; generation and tools incur costs. Warm cache is not guaranteed.`
+      : "Automatic handoff: off.", "info")
+  }
+
+  const setHandoffThreshold = (ctx: ExtensionContext, usd: number) => {
+    handoffThreshold = usd
+    save(ctx, { handoffThresholdUsd: usd })
+    ctx.ui.notify(`Automatic handoff threshold: recorded session total must exceed ${formatUsd(usd)}. Cold-send budget is unchanged.`, "info")
+  }
+
+  const pickHandoffThreshold = async (ctx: ExtensionContext) => {
+    const typed = await ctx.ui.input("Automatic handoff: total session cost threshold in USD", String(handoffThreshold))
+    if (typed === undefined) return
+    const usd = parseUsd(typed)
+    if (usd === undefined) ctx.ui.notify(`"${typed}" is not a valid amount.`, "error")
+    else setHandoffThreshold(ctx, usd)
+  }
+
+  const pickHandoff = async (ctx: ExtensionContext) => {
+    const on = "On · one automatic run; generation and tools incur costs"
+    const off = "Off · no automatic generation"
+    const threshold = `Threshold · session total > ${formatUsd(handoffThreshold)}`
+    const picked = await ctx.ui.select(`Automatic handoff: ${describeHandoff()} (warm cache is not guaranteed)`, [on, off, threshold])
+    if (picked === on) setHandoff(ctx, true)
+    else if (picked === off) setHandoff(ctx, false)
+    else if (picked === threshold) await pickHandoffThreshold(ctx)
   }
 
   const pickPlacement = async (ctx: ExtensionContext) => {
@@ -233,10 +302,21 @@ export default function cacheGuardExtension(pi: ExtensionAPI, options: { handoff
   }
 
   pi.registerCommand("cache-guard", {
-    description: "Cache guard settings: budget <usd> | above, below, corner, footer, off",
+    description: "Cache guard settings: budget <usd> | handoff on, off, threshold <usd> | above, below, corner, footer, off",
     getArgumentCompletions: (prefix) => {
       const [first = "", second] = prefix.trimStart().split(/\s+/, 2)
       if (second !== undefined || /\s$/.test(prefix)) {
+        if (first === "handoff") {
+          // Do not replace a threshold amount with its parent subcommand.
+          if (/^handoff\s+\S+\s/.test(prefix.trimStart())) return null
+          const typed = (second ?? "").toLowerCase()
+          const items = [
+            { value: "handoff on", label: "on", description: "enable one automatic handoff (incurs costs)" },
+            { value: "handoff off", label: "off", description: "disable automatic handoff (default)" },
+            { value: "handoff threshold", label: "threshold", description: `total session USD threshold (now ${formatUsd(handoffThreshold)})` },
+          ].filter((item) => item.label.startsWith(typed))
+          return items.length ? items : null
+        }
         if (first !== "budget") return null
         const typed = (second ?? "").toLowerCase()
         const items = [0, ...BUDGET_PRESETS]
@@ -246,6 +326,7 @@ export default function cacheGuardExtension(pi: ExtensionAPI, options: { handoff
       }
       const items = [
         { value: "budget", label: "budget", description: `cost limit before asking (now ${describeBudget(budget)})` },
+        { value: "handoff", label: "handoff", description: `automatic handoff (${describeHandoff()})` },
         ...PLACEMENTS.map((p) => ({ value: p, label: p, description: PLACEMENT_HELP[p] })),
       ].filter((item) => item.label.startsWith(first))
       return items.length ? items : null
@@ -255,9 +336,11 @@ export default function cacheGuardExtension(pi: ExtensionAPI, options: { handoff
       if (!first) {
         const placementItem = `Placement · ${PLACEMENT_HELP[placement]}`
         const budgetItem = `Budget · ${describeBudget(budget)}`
-        const picked = await ctx.ui.select("Cache guard settings", [budgetItem, placementItem])
+        const handoffItem = `Automatic handoff · ${describeHandoff()}`
+        const picked = await ctx.ui.select("Cache guard settings", [budgetItem, placementItem, handoffItem])
         if (picked === budgetItem) await pickBudget(ctx)
         else if (picked === placementItem) await pickPlacement(ctx)
+        else if (picked === handoffItem) await pickHandoff(ctx)
         return
       }
       if (first === "budget") {
@@ -267,8 +350,19 @@ export default function cacheGuardExtension(pi: ExtensionAPI, options: { handoff
         else setBudget(ctx, usd)
         return
       }
+      if (first === "handoff") {
+        if (rest.length === 0) return pickHandoff(ctx)
+        if (rest.length === 1 && (rest[0] === "on" || rest[0] === "off")) return setHandoff(ctx, rest[0] === "on")
+        if (rest[0] === "threshold") {
+          if (rest.length === 1) return pickHandoffThreshold(ctx)
+          const usd = parseUsd(rest.slice(1).join(" "))
+          if (usd !== undefined) return setHandoffThreshold(ctx, usd)
+        }
+        ctx.ui.notify("Use: /cache-guard handoff on | off | threshold <usd> (finite, nonnegative USD).", "error")
+        return
+      }
       if (isPlacement(first)) return setPlacement(ctx, first)
-      ctx.ui.notify(`Unknown option "${first}". Use: budget <usd>, ${PLACEMENTS.join(", ")}.`, "error")
+      ctx.ui.notify(`Unknown option "${first}". Use: budget <usd>, handoff on | off | threshold <usd>, ${PLACEMENTS.join(", ")}.`, "error")
     },
   })
 
@@ -283,9 +377,11 @@ export default function cacheGuardExtension(pi: ExtensionAPI, options: { handoff
 
   pi.on("session_start", (_event, ctx) => {
     current = ctx
+    sessionId = ctx.sessionManager.getSessionId()
     if (timer) clearInterval(timer)
+    timer = undefined
     if (ctx.hasUI) {
-      timer = setInterval(refreshStatus, 1000)
+      timer = setInterval(tick, 1000)
       timer.unref?.()
     }
     refreshStatus()
@@ -296,12 +392,19 @@ export default function cacheGuardExtension(pi: ExtensionAPI, options: { handoff
     if (timer) clearInterval(timer)
     timer = undefined
     current = undefined
+    sessionId = undefined
   })
 
-  pi.on("model_select", (_event, ctx) => {
+  // Each event supplies the current context, not a command context retained from an old session.
+  const updateContext = (_event: unknown, ctx: ExtensionContext) => {
     current = ctx
     refreshStatus()
-  })
+  }
+  pi.on("model_select", updateContext)
+  pi.on("session_tree", updateContext)
+  pi.on("session_compact", updateContext)
+  pi.on("agent_start", updateContext)
+  pi.on("agent_end", updateContext)
 
   pi.on("input", async (event, ctx) => {
     if (event.source !== "interactive" || event.streamingBehavior || !ctx.hasUI) return { action: "continue" as const }
