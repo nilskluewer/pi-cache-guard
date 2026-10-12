@@ -17,6 +17,8 @@ import {
   warmCost,
 } from "./cache-guard-logic.ts"
 
+import { createHandoffService, type HandoffOptions } from "./handoff.ts"
+
 export * from "./cache-guard-logic.ts"
 
 const STATUS_KEY = "cache-guard"
@@ -101,7 +103,8 @@ function inspect(ctx: ExtensionContext) {
   return { model, retention, hit, status, tokens }
 }
 
-export default function cacheGuardExtension(pi: ExtensionAPI) {
+export default function cacheGuardExtension(pi: ExtensionAPI, options: { handoff?: HandoffOptions } = {}) {
+  const handoff = createHandoffService(pi, options.handoff)
   let timer: ReturnType<typeof setInterval> | undefined
   let current: ExtensionContext | undefined
   let placement = loadSettings().placement ?? DEFAULT_PLACEMENT
@@ -340,4 +343,7 @@ export default function cacheGuardExtension(pi: ExtensionAPI) {
     ctx.ui.setEditorText(event.text)
     return { action: "handled" as const }
   })
+
+  // Pi ignores the factory result; the harness uses this narrow service contract.
+  return handoff
 }
