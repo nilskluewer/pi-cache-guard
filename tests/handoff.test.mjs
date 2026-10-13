@@ -1,4 +1,5 @@
 import assert from "node:assert/strict"
+import { execFileSync } from "node:child_process"
 import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
@@ -17,7 +18,7 @@ Redact any sensitive information, such as API keys, passwords, or personally ide
 
 If the user passed arguments, treat them as a description of what the next session will focus on and tailor the doc accordingly.`
 
-function harness(t, { ephemeral = false, agentWithinWorkspace = false } = {}) {
+function harness(t, { ephemeral = false, agentWithinWorkspace = false, trailingTemp = false } = {}) {
   const root = mkdtempSync(join(tmpdir(), "cache-guard-handoff-test-"))
   t.after(() => rmSync(root, { recursive: true, force: true }))
   const workspace = join(root, "workspace")
@@ -43,7 +44,7 @@ function harness(t, { ephemeral = false, agentWithinWorkspace = false } = {}) {
         sent.push({ text, options })
       },
     }
-    service = extension(pi, { handoff: { tempDir: root, agentDir: join(agentWithinWorkspace ? workspace : root, "agent") } })
+    service = extension(pi, { handoff: { tempDir: root + (trailingTemp ? "/" : ""), agentDir: join(agentWithinWorkspace ? workspace : root, "agent") } })
     return service
   }
   const emit = async (name, event = {}) => {
@@ -59,7 +60,10 @@ function harness(t, { ephemeral = false, agentWithinWorkspace = false } = {}) {
     action?.()
     await emit("tool_result", { ...event, isError, content })
   }
-  const finish = () => emit("agent_end", { messages: [{ role: "assistant", stopReason: "stop", content: [] }] })
+  const finish = async () => {
+    await emit("agent_end", { messages: [{ role: "assistant", stopReason: "stop", content: [] }] })
+    await emit("agent_settled")
+  }
   load()
   const resume = () => {
     manager = SessionManager.open(manager.getSessionFile())
@@ -236,6 +240,32 @@ for (const mode of ["shell", "codemode", "nested write", "output-only", "TMPDIR"
   })
 }
 
+// The shell concatenates strings; the override must keep its separator exactly.
+for (const variable of ["${TMPDIR}", "$TMPDIR", "%TEMP%"]) {
+  test(`raw ${variable} expansion preserves trailing separator and temp bounds`, async (t) => {
+    const h = harness(t, { trailingTemp: true })
+    await h.start()
+    // Unbraced $TMPDIR needs a delimiter: $TMPDIRhandoff is a different variable.
+    const command = `printf '# Handoff\\n' > "${variable}${variable === "$TMPDIR" ? "/" : ""}handoff.md"`
+    // %TEMP% uses Windows syntax; substitute its value before the local POSIX execution.
+    await h.tool("bash", { command }, () => execFileSync("bash", ["-c", command.replaceAll("%TEMP%", h.root + "/")],
+      { env: { ...process.env, TMPDIR: h.root + "/" } }))
+    await h.finish()
+    assert.equal(h.service.getState(h.ctx).status, "ready")
+    assert.ok(readFileSync(h.service.getAvailable(h.ctx).path, "utf8").endsWith("# Handoff\n"))
+
+    const noSeparator = harness(t)
+    const outside = noSeparator.root + "handoff.md"
+    t.after(() => rmSync(outside, { force: true }))
+    await noSeparator.start()
+    await noSeparator.tool("bash", { command }, () => execFileSync("bash", ["-c", command.replaceAll("%TEMP%", noSeparator.root)],
+      { env: { ...process.env, TMPDIR: noSeparator.root } }))
+    await noSeparator.finish()
+    assert.equal(noSeparator.service.getState(noSeparator.ctx).status, variable === "$TMPDIR" ? "ready" : "failed",
+      "do not invent a slash or accept output outside temp bounds")
+  })
+}
+
 // Metadata strings must not inject YAML keys; an ephemeral session has no invented resume link.
 test("metadata escapes session strings and omits a file link for file-less sessions", async (t) => {
   const h = harness(t, { ephemeral: true })
@@ -311,7 +341,10 @@ for (const boundary of ["session_shutdown", "session_tree", "unrelated prompt", 
     const path = join(h.root, "handoff.md")
     await h.tool("write", { path }, () => writeFileSync(path, "# Handoff\n"))
     if (boundary === "unrelated prompt") await h.emit("before_agent_start", { prompt: "Real user task" })
-    else if (boundary === "aborted" || boundary === "model error") await h.emit("agent_end", { messages: [{ role: "assistant", stopReason: boundary === "aborted" ? "aborted" : "error" }] })
+    else if (boundary === "aborted" || boundary === "model error") {
+      await h.emit("agent_end", { messages: [{ role: "assistant", stopReason: boundary === "aborted" ? "aborted" : "error" }] })
+      await h.emit("agent_settled")
+    }
     else await h.emit(boundary)
     await h.tool("write", { path }, () => writeFileSync(path, "# Later task\n"))
     await h.finish()
