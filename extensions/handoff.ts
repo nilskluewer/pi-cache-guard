@@ -81,10 +81,11 @@ function strings(value: unknown): string[] {
 }
 
 /** Paths must be named by this run's tools. Never search nearby temp files. */
-function namedPaths(value: unknown, temp: string): string[] {
+function namedPaths(value: unknown, expansion: { TMPDIR: string; TEMP: string }): string[] {
   const paths = new Set<string>()
   for (const raw of strings(value)) {
-    const text = raw.replace(/\$\{TMPDIR\}|\$TMPDIR|%TEMP%/g, temp)
+    const text = raw.replace(/\$\{TMPDIR\}|\$TMPDIR(?![A-Za-z0-9_])|%TEMP%/g, (variable) =>
+      variable === "%TEMP%" ? expansion.TEMP : expansion.TMPDIR)
     if (isAbsolute(text) && extname(text).toLowerCase() === ".md") paths.add(resolve(text))
     // Quoted paths permit spaces. Unquoted shell/JS/Markdown paths stop at delimiters.
     for (const match of text.matchAll(/["'`]([^"'`\r\n]+\.md)["'`]|((?:[A-Za-z]:[\\/]|\/)[^\s"'`<>|;(){}\[\],]+\.md)/gi)) {
@@ -96,12 +97,20 @@ function namedPaths(value: unknown, temp: string): string[] {
 }
 
 export function createHandoffService(pi: ExtensionAPI, options: HandoffOptions = {}): HandoffService {
-  const temp = resolve(options.tempDir ?? (process.platform === "win32" ? process.env.TEMP ?? tmpdir() : process.env.TMPDIR || "/tmp"))
+  // Expansion is string substitution, not path joining: macOS TMPDIR ends in '/'.
+  // Keep the raw value (including a test override's separators) separate from bounds.
+  const tempExpansion = options.tempDir ?? (process.platform === "win32" ? process.env.TEMP ?? tmpdir() : process.env.TMPDIR || "/tmp")
+  const temp = resolve(tempExpansion)
+  const expansion = {
+    TMPDIR: options.tempDir ?? (process.env.TMPDIR || "/tmp"),
+    TEMP: options.tempDir ?? (process.env.TEMP ?? tmpdir()),
+  }
   const durableDir = join(resolve(options.agentDir ?? getAgentDir()), "handoffs")
   const memory = new Map<string, HandoffState>()
   type Active = {
     state: HandoffState; started: boolean; evidence: Map<string, string>; existingTempNames: Set<string>
     calls: Map<string, Map<string, string | undefined>>
+    lastStopReason?: string
   }
   let active: Active | undefined
   let confirmationTimer: ReturnType<typeof setTimeout> | undefined
@@ -205,7 +214,7 @@ export function createHandoffService(pi: ExtensionAPI, options: HandoffOptions =
   pi.on("tool_call", (event, ctx) => {
     if (!active?.started || !belongs(ctx)) return
     const before = new Map<string, string | undefined>()
-    for (const path of namedPaths(event.input, temp)) {
+    for (const path of namedPaths(event.input, expansion)) {
       try { before.set(path, readMarkdown(path).sha256) } catch { before.set(path, undefined) }
     }
     active.calls.set(event.toolCallId, before)
@@ -215,7 +224,7 @@ export function createHandoffService(pi: ExtensionAPI, options: HandoffOptions =
     const before = active.calls.get(event.toolCallId)
     active.calls.delete(event.toolCallId)
     if (!before || event.isError || !["write", "edit", "bash", "powershell", "codemode"].includes(event.toolName)) return
-    for (const path of new Set([...before.keys(), ...namedPaths(event.content, temp)])) {
+    for (const path of new Set([...before.keys(), ...namedPaths(event.content, expansion)])) {
       if (!tempPath(ctx, path)) continue
       try {
         const file = readMarkdown(path)
@@ -230,11 +239,17 @@ export function createHandoffService(pi: ExtensionAPI, options: HandoffOptions =
   })
   pi.on("agent_end", (event, ctx) => {
     if (!active || !belongs(ctx)) return
+    // A low-level loop can end before Pi's retry/recovery/extension continuation.
+    active.lastStopReason = event.messages.filter((message) => message.role === "assistant").at(-1)?.stopReason
+  })
+  pi.on("agent_settled", (event, ctx) => {
+    if (!active || !belongs(ctx)) return
     const run = active
     clearConfirmation()
     active = undefined
-    const last = event.messages.filter((message) => message.role === "assistant").at(-1)
-    if (!run.started || !last || last.stopReason === "error" || last.stopReason === "aborted") {
+    // Pi 1.0 has no aborted field; its last assistant still reports 'aborted'.
+    // Only non-context metadata is persisted here; never request a continuation.
+    if (!run.started || ("aborted" in event && event.aborted) || !run.lastStopReason || run.lastStopReason === "error" || run.lastStopReason === "aborted") {
       fail(ctx, run.state, "Generation failed or was aborted")
       return
     }

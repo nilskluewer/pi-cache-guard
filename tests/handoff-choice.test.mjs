@@ -83,6 +83,7 @@ function harness(t) {
     get options() { return options }, get title() { return title }, get editor() { return editor }, get replacements() { return replacements },
     set pick(value) { pick = value }, set cancelSwitch(value) { cancelSwitch = value }, set failSwitch(value) { failSwitch = value },
     set failSend(value) { failSend = value }, set beforeBridge(value) { beforeBridge = value },
+    emit: async (name, event = {}) => { for (const fn of handlers.get(name) ?? []) await fn({ type: name, ...event }, ctx) },
     startSession: async () => { for (const fn of handlers.get("session_start") ?? []) await fn({}, ctx) },
     input: async (event = request) => { let result; for (const fn of handlers.get("input") ?? []) result = await fn(event, ctx); return result },
     dispatch: async () => { beforeBridge?.(); const text = bridges.at(-1).text; const [name, ...args] = text.slice(1).split(" ");
@@ -152,7 +153,38 @@ test("cancel preserves text and images across reload and an edited retry", async
   h.load(); h.pick = (choices) => choices.find((s) => s.startsWith("Continue"))
   assert.deepEqual(await h.input({ source: "interactive", text: "Edited task" }),
     { action: "transform", text: "Edited task", images: [image] })
+  assert.equal(readdirSync(drafts).length, 1, "input processing is not acceptance")
+  await h.emit("before_agent_start", { prompt: "Edited task", images: [image] })
+  const message = { role: "user", content: [{ type: "text", text: "Edited task" }, image], timestamp: 1 }
+  await h.emit("message_end", { message })
+  assert.equal(readdirSync(drafts).length, 1, "message_end precedes persistence")
+  h.manager.appendMessage(message)
+  await h.emit("turn_end")
+  assert.equal(readdirSync(drafts).length, 0)
   assert.deepEqual(await h.input({ source: "interactive", text: "Next task" }), { action: "continue" })
+})
+
+test("unrelated persistence or a newer cancelled draft cannot consume recovery data", async (t) => {
+  const h = harness(t), drafts = join(h.root, "agent", "cache-guard-drafts")
+  h.pick = () => undefined
+  await h.input()
+  h.pick = (choices) => choices.find((s) => s.startsWith("Continue"))
+  await h.input({ source: "interactive", text: "Accepted request" })
+  await h.emit("before_agent_start", { prompt: "Accepted request", images: [image] })
+  const unrelated = { role: "user", content: [{ type: "text", text: "Unrelated request" }], timestamp: 1 }
+  await h.emit("message_end", { message: unrelated })
+  h.manager.appendMessage(unrelated)
+  await h.emit("turn_end")
+  assert.equal(readdirSync(drafts).length, 1)
+  const accepted = { role: "user", content: [{ type: "text", text: "Accepted request" }, image], timestamp: 2 }
+  await h.emit("message_end", { message: accepted })
+  h.pick = () => undefined
+  await h.input({ source: "interactive", text: "New cancelled draft" })
+  h.manager.appendMessage(accepted)
+  await h.emit("turn_end")
+  assert.equal(readdirSync(drafts).length, 1, "matching old request cannot remove a newer draft")
+  h.load(); await h.startSession()
+  assert.equal(h.editor, "New cancelled draft")
 })
 
 test("cancelled or failed switch and a removed file preserve the pending request", async (t) => {

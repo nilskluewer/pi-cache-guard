@@ -66,7 +66,39 @@ export function createHandoffChooser(pi: ExtensionAPI, handoff: HandoffService, 
     if (pending.images?.length && saved) ctx.ui.notify("Images retained for the next model-bound input (including after reload).", "info")
     return saved
   }
+  type Acceptance = { pending: Pending; prompt?: string; message?: unknown }
+  const accepting = new Map<string, Acceptance>()
+  pi.on("before_agent_start", (event, ctx) => {
+    const attempt = accepting.get(ctx.sessionManager.getSessionId())
+    if (!attempt) return
+    // Capture template/skill expansion, but do not consume the draft: image processing
+    // and user-message persistence still follow this hook.
+    if (JSON.stringify(event.images ?? []) !== JSON.stringify(attempt.pending.images ?? [])) return
+    attempt.prompt = event.prompt
+  })
+  pi.on("message_end", (event, ctx) => {
+    const attempt = accepting.get(ctx.sessionManager.getSessionId())
+    if (attempt?.prompt === undefined || event.message.role !== "user") return
+    const text = typeof event.message.content === "string" ? event.message.content :
+      event.message.content.filter((part) => part.type === "text").map((part) => part.text).join("")
+    // Pi can append image-normalization hints to the expanded prompt.
+    if (text === attempt.prompt || text.startsWith(attempt.prompt + "\n\n")) attempt.message = event.message
+  })
+  const clearAccepted = (_event: unknown, ctx: ExtensionContext) => {
+    const id = ctx.sessionManager.getSessionId()
+    const attempt = accepting.get(id)
+    if (!attempt?.message) return
+    // message_end handlers run BEFORE persistence in Pi 1.0/1.1. A later boundary
+    // must confirm the exact message object was appended, not an unrelated user turn.
+    if (!ctx.sessionManager.getBranch().some((entry) => entry.type === "message" && entry.message === attempt.message)) return
+    accepting.delete(id)
+    if (JSON.stringify(readDraft(ctx)) === JSON.stringify(attempt.pending)) saveDraft(ctx, null)
+  }
+  pi.on("turn_end", clearAccepted)
+  pi.on("agent_end", clearAccepted)
+  pi.on("agent_settled", clearAccepted)
   pi.on("session_start", (_event, ctx) => {
+    accepting.delete(ctx.sessionManager.getSessionId())
     if (!ctx.hasUI) return
     const pending = readDraft(ctx)
     if (!pending) return
@@ -145,7 +177,11 @@ export function createHandoffChooser(pi: ExtensionAPI, handoff: HandoffService, 
       return { text: event.text, ...(unique.length ? { images: unique } : {}) }
     },
     continue(event: InputEvent, pending: Pending, ctx: ExtensionContext) {
-      if (readDraft(ctx)) saveDraft(ctx, null)
+      if (readDraft(ctx)) {
+        // Keep edited text and merged images recoverable if preflight rejects the send.
+        saveDraft(ctx, pending)
+        accepting.set(ctx.sessionManager.getSessionId(), { pending })
+      }
       return JSON.stringify(event.images ?? []) === JSON.stringify(pending.images ?? []) ?
         { action: "continue" as const } : { action: "transform" as const, ...pending }
     },
