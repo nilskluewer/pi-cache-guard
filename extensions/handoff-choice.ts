@@ -24,6 +24,21 @@ function isOlder(ctx: ExtensionContext, artifact: HandoffArtifact): boolean {
   return before.size !== now.size || [...before].some((id) => !now.has(id))
 }
 
+/** Pi mutates its branch before writing JSONL. Memory membership (or a resolved send)
+ * is not a persistence receipt. Check complete lines, including image data, only at
+ * acceptance boundaries. A file-less or unreadable session cannot prove durability. */
+function persisted(ctx: ExtensionContext, entries: SessionEntry[]): boolean {
+  const path = ctx.sessionManager.getSessionFile()
+  if (!path || !entries.length) return false
+  try {
+    const lines = readFileSync(path, "utf8").split("\n")
+    lines.pop() // A partial final line is not a completed Pi append.
+    const header = JSON.parse(lines[0])
+    return header.type === "session" && header.id === ctx.sessionManager.getSessionId() &&
+      entries.every((entry) => lines.includes(JSON.stringify(entry)))
+  } catch { return false }
+}
+
 /** The command bridge is the only session-replacement boundary. Never retain a command context. */
 export function createHandoffChooser(pi: ExtensionAPI, handoff: HandoffService, agentDir = getAgentDir()) {
   const transitions = new Map<string, { sessionId: string; pending: Pending; artifact: HandoffArtifact }>()
@@ -88,9 +103,10 @@ export function createHandoffChooser(pi: ExtensionAPI, handoff: HandoffService, 
     const id = ctx.sessionManager.getSessionId()
     const attempt = accepting.get(id)
     if (!attempt?.message) return
-    // message_end handlers run BEFORE persistence in Pi 1.0/1.1. A later boundary
-    // must confirm the exact message object was appended, not an unrelated user turn.
-    if (!ctx.sessionManager.getBranch().some((entry) => entry.type === "message" && entry.message === attempt.message)) return
+    // message_end handlers precede appendMessage; appendMessage can then fail AFTER
+    // adding the entry in memory. Confirm this exact message, including images, on disk.
+    const entry = ctx.sessionManager.getBranch().find((entry) => entry.type === "message" && entry.message === attempt.message)
+    if (!entry || !persisted(ctx, [entry])) return
     accepting.delete(id)
     if (JSON.stringify(readDraft(ctx)) === JSON.stringify(attempt.pending)) saveDraft(ctx, null)
   }
@@ -136,6 +152,7 @@ export function createHandoffChooser(pi: ExtensionAPI, handoff: HandoffService, 
           parentSession,
           withSession: async (fresh) => {
             replaced = true
+            const before = new Set(fresh.sessionManager.getBranch().map((entry) => entry.id))
             try {
               await fresh.sendMessage({ customType: "cache-guard.handoff-context", content: body, display: true }, { triggerTurn: false })
               // Expand the pending request on its own, so skill/template commands retain their meaning.
@@ -149,6 +166,16 @@ export function createHandoffChooser(pi: ExtensionAPI, handoff: HandoffService, 
               // File-less sessions have no resumable parent. Keep handoff + request in the fresh draft.
               restore(fresh, { ...pending, text: `## Saved handoff\n\n${body}\n\n## Pending request\n\n${pending.text}` })
               fresh.ui.notify(`Could not send the request: ${String(error)}. Draft retained.`, "error")
+              return
+            }
+            // A send can resolve after input was handled without a user message, or
+            // with only in-memory state. Verify the new request and handoff on disk.
+            const added = fresh.sessionManager.getBranch().filter((entry) => !before.has(entry.id))
+            const user = added.find((entry) => entry.type === "message" && entry.message.role === "user")
+            const context = added.find((entry) => entry.type === "custom_message" &&
+              entry.customType === "cache-guard.handoff-context" && entry.content === body)
+            if (!user || !context || !persisted(fresh, [user, context])) {
+              fresh.ui.notify("Destination request is not confirmed on disk. The source recovery draft was retained.", "warning")
               return
             }
             // Source ctx/pi are invalid. Clear recovery data using only the captured session ID.

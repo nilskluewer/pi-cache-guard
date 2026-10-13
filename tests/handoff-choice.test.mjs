@@ -1,8 +1,8 @@
 import assert from "node:assert/strict"
 import { createHash } from "node:crypto"
-import { mkdtempSync, mkdirSync, readdirSync, statSync, writeFileSync, rmSync } from "node:fs"
+import { mkdtempSync, mkdirSync, readFileSync, readdirSync, renameSync, statSync, writeFileSync, rmSync } from "node:fs"
 import { tmpdir } from "node:os"
-import { join } from "node:path"
+import { dirname, join } from "node:path"
 import test from "node:test"
 import { SessionManager } from "@earendil-works/pi-coding-agent"
 import extension from "../extensions/cache-guard.ts"
@@ -19,10 +19,10 @@ const request = { source: "interactive", text: "Continue my task", images: [imag
 // Oracle: spec stories 19–26 and installed Pi command-context contract.
 // Falsifiers: unverified files offered; metadata/generation marks stale; retained old ctx;
 // plain-text internal command; lost/duplicate images; silent switch on cancel.
-function harness(t) {
+function harness(t, { fileLess = false } = {}) {
   const root = mkdtempSync(join(tmpdir(), "handoff-choice-"))
   t.after(() => rmSync(root, { recursive: true, force: true }))
-  const manager = SessionManager.create(root, join(root, "sessions"))
+  const manager = fileLess ? SessionManager.inMemory(root) : SessionManager.create(root, join(root, "sessions"))
   const append = (text) => manager.appendMessage({ role: "user", content: text, timestamp: 0 })
   append("Original task")
   manager.appendMessage({ role: "assistant", provider: model.provider, model: model.id, timestamp: 0,
@@ -47,9 +47,17 @@ function harness(t) {
     ui: { select: async (heading, choices) => { title = heading; options = choices; return pick(choices) },
       notify: (text, level) => notes.push({ text, level }), setEditorText: (text) => { if (stale) throw Error("stale context"); editor = text },
       getEditorText: () => editor ?? "", setStatus: () => {}, setWidget: () => {}, theme: { fg: (_color, text) => text } } }
-  const fresh = { ...ctx, sessionManager: SessionManager.inMemory(root),
-    sendMessage: async (message) => contexts.push(message),
-    sendUserMessage: async (content, opts) => { if (failSend) throw Error("send failed"); sent.push({ content, opts }) },
+  const fresh = { ...ctx, sessionManager: SessionManager.create(root, join(root, "fresh-sessions")),
+    sendMessage: async (message) => {
+      contexts.push(message)
+      fresh.sessionManager.appendCustomMessageEntry(message.customType, message.content, message.display)
+    },
+    sendUserMessage: async (content, opts) => {
+      if (failSend) throw Error("send failed")
+      sent.push({ content, opts })
+      fresh.sessionManager.appendMessage({ role: "user", content, timestamp: 1 })
+      fresh.sessionManager.appendMessage({ role: "assistant", content: [{ type: "text", text: "Offline fixture response" }], stopReason: "stop", timestamp: 2 })
+    },
     switchSession: async (_path, opts) => { stale = false; await opts.withSession({ ...ctx, sendUserMessage: fresh.sendUserMessage }); return { cancelled: false } } }
   const commandCtx = { ...ctx, newSession: async (opts) => {
     replacements++
@@ -109,6 +117,9 @@ test("verified handoff crosses command boundary, links parent, sends once throug
   assert.equal(content[0].text, request.text)
   assert.equal(h.sent[0].opts.expandPromptTemplates, true)
   assert.deepEqual(content.slice(1), [image])
+  const persistedUser = SessionManager.open(h.fresh.sessionManager.getSessionFile()).getBranch()
+    .find((entry) => entry.type === "message" && entry.message.role === "user")
+  assert.deepEqual(persistedUser.message.content, content, "success fixture really persisted text and images")
   await h.dispatch() // token consumed, never duplicate send
   assert.equal(h.sent.length, 1)
   h.ctx.sessionManager = SessionManager.open(h.source.sessionFile)
@@ -163,6 +174,91 @@ test("cancel preserves text and images across reload and an edited retry", async
   assert.equal(readdirSync(drafts).length, 0)
   assert.deepEqual(await h.input({ source: "interactive", text: "Next task" }), { action: "continue" })
 })
+
+// Oracle: durable recovery is disposable only when the complete accepted request is
+// on disk. Pi's real appendMessage mutates its branch before the disk write can fail.
+for (const failure of ["missing directory", "file-less", "missing image on disk"]) {
+  test(`Continue retains recovery when persistence has ${failure}`, async (t) => {
+    const h = harness(t, { fileLess: failure === "file-less" })
+    const drafts = join(h.root, "agent", "cache-guard-drafts")
+    h.pick = () => undefined
+    await h.input()
+    h.load(); h.pick = (choices) => choices.find((s) => s.startsWith("Continue"))
+    await h.input({ source: "interactive", text: "Recovered request" })
+    await h.emit("before_agent_start", { prompt: "Recovered request", images: [image] })
+    const message = { role: "user", content: [{ type: "text", text: "Recovered request" }, image], timestamp: 1 }
+    await h.emit("message_end", { message })
+    let diskBefore
+    const path = h.manager.getSessionFile(), moved = join(h.root, "moved-sessions")
+    if (failure === "missing directory") {
+      renameSync(dirname(path), moved)
+      assert.throws(() => h.manager.appendMessage(message), { code: "ENOENT" })
+      assert.equal(readFileSync(join(moved, path.split(/[\\/]/).at(-1)), "utf8").includes("Recovered request"), false)
+    } else {
+      h.manager.appendMessage(message)
+      if (path) {
+        diskBefore = readFileSync(path, "utf8")
+        const entry = h.manager.getBranch().at(-1)
+        const incomplete = { ...entry, message: { ...message, content: message.content.slice(0, 1) } }
+        writeFileSync(path, diskBefore.replace(JSON.stringify(entry), JSON.stringify(incomplete)))
+      }
+    }
+    assert.ok(h.manager.getBranch().some((entry) => entry.type === "message" && entry.message === message), "real manager contains the exact user object in memory")
+    await h.emit("agent_settled")
+    assert.equal(readdirSync(drafts).length, 1, "memory is not evidence of complete disk persistence")
+    assert.deepEqual(JSON.parse(readFileSync(join(drafts, readdirSync(drafts)[0]), "utf8")).pending.images, [image])
+    if (failure === "missing directory") {
+      renameSync(moved, dirname(path))
+      h.ctx.sessionManager = SessionManager.open(path)
+      h.load(); await h.startSession()
+      assert.deepEqual(await h.input({ source: "interactive", text: "Recovered request" }),
+        { action: "transform", text: "Recovered request", images: [image] }, "reload recovers the image from the durable draft")
+      await h.emit("before_agent_start", { prompt: "Recovered request", images: [image] })
+      const retry = structuredClone(message)
+      await h.emit("message_end", { message: retry })
+      h.ctx.sessionManager.appendMessage(retry)
+      await h.emit("agent_settled")
+      assert.equal(readdirSync(drafts).length, 0, "retry persisted on disk can consume recovery")
+    }
+    if (diskBefore) {
+      writeFileSync(path, diskBefore)
+      await h.emit("agent_settled")
+      assert.equal(readdirSync(drafts).length, 0, "complete persisted entry can consume recovery")
+    }
+  })
+}
+
+for (const destination of ["file-less", "memory-only request", "missing image on disk", "handled input"]) {
+  test(`new-session ${destination} preserves source recovery`, async (t) => {
+    const h = harness(t), drafts = join(h.root, "agent", "cache-guard-drafts")
+    if (destination === "file-less") h.fresh.sessionManager = SessionManager.inMemory(h.root)
+    if (destination === "memory-only request") {
+      const moved = join(h.root, "moved-fresh")
+      // Model a send route that resolves after a persistence error was reported elsewhere.
+      h.fresh.sendUserMessage = async (content) => {
+        renameSync(h.fresh.sessionManager.getSessionDir(), moved)
+        assert.throws(() => h.fresh.sessionManager.appendMessage({ role: "user", content, timestamp: 1 }), { code: "ENOENT" })
+      }
+    }
+    if (destination === "missing image on disk") {
+      const send = h.fresh.sendUserMessage
+      h.fresh.sendUserMessage = async (content, opts) => {
+        await send(content, opts)
+        const path = h.fresh.sessionManager.getSessionFile()
+        const entry = h.fresh.sessionManager.getBranch().find((entry) => entry.type === "message" && entry.message.role === "user")
+        writeFileSync(path, readFileSync(path, "utf8").replace(JSON.stringify(entry), JSON.stringify({ ...entry, message: { ...entry.message, content: content.slice(0, 1) } })))
+      }
+    }
+    if (destination === "handled input") h.fresh.sendUserMessage = async () => {}
+    await h.input(); await h.dispatch()
+    assert.equal(readdirSync(drafts).length, 1, "resolved send is not evidence of a persisted destination request")
+    assert.deepEqual(JSON.parse(readFileSync(join(drafts, readdirSync(drafts)[0]), "utf8")).pending.images, [image])
+    assert.ok(h.notes.some((note) => /not confirmed on disk.*draft was retained/.test(note.text)))
+    h.load(); h.pick = (choices) => choices.find((s) => s.startsWith("Continue"))
+    assert.deepEqual(await h.input({ source: "interactive", text: "Resume source request" }),
+      { action: "transform", text: "Resume source request", images: [image] })
+  })
+}
 
 test("unrelated persistence or a newer cancelled draft cannot consume recovery data", async (t) => {
   const h = harness(t), drafts = join(h.root, "agent", "cache-guard-drafts")
