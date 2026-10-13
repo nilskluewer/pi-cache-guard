@@ -24,7 +24,9 @@ const run = (cmd, args, cwd) => {
 // 1. Pack and install without peer dependencies: Pi supplies its own packages to extensions.
 const tarball = run("npm", ["pack", "--silent", "--pack-destination", tmp], root).split("\n").pop()
 writeFileSync(join(tmp, "package.json"), '{"private":true}')
-run("npm", ["install", join(tmp, tarball), "--omit=peer", "--no-audit", "--no-fund", "--silent"], tmp)
+// --omit=peer still resolves peers (and may query the registry). Pi supplies these
+// packages at runtime, so skip peer resolution entirely for this package-only smoke.
+run("npm", ["install", join(tmp, tarball), "--legacy-peer-deps", "--no-audit", "--no-fund"], tmp)
 const installed = join(tmp, "node_modules", ...pkg.name.split("/"))
 
 // 2. Load every declared extension in a real Pi process and ask for its commands.
