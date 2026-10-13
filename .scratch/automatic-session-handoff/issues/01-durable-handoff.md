@@ -4,12 +4,12 @@
 
 **Blocked by:** None (can start immediately).
 
-**Status:** ready-for-agent
+**Status:** implemented — automated checks passed; live interactive acceptance test pending.
 
-- [ ] Use the current model, original prompt verbatim, and normal session tools without compaction.
-- [ ] Verify the actual generated Markdown temp file, including writes through shell/codemode or a defensible fallback.
-- [ ] Save a durable copy outside the workspace with source session ID, source session file when available, source leaf ID, and timestamp.
-- [ ] Persist dispatch and result state as non-context session metadata, guarding once per session across reload and branches.
-- [ ] Report generation/storage failures without unattended retries or false success.
-- [ ] Prove external behavior with extension-level tests and real temporary/durable files.
-- [ ] Expose narrow shared contracts for scheduling and later session replacement. Document those contracts in your completion summary.
+- [x] Use the current model, original prompt verbatim, and normal session tools without compaction.
+- [x] Verify the actual generated Markdown temp file, including writes through shell/codemode or a defensible fallback.
+- [x] Save a durable copy outside the workspace with source session ID, source session file when available, source leaf ID, and timestamp.
+- [x] Persist dispatch and result state as non-context session metadata, guarding once per session across reload and branches.
+- [x] Report generation/storage failures without unattended retries or false success.
+- [x] Prove external behavior with extension-level tests and real temporary/durable files.
+- [x] Expose narrow shared contracts for scheduling and later session replacement. Document those contracts in your completion summary.
