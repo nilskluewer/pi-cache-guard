@@ -94,3 +94,79 @@ Final log: `/tmp/handoff-review-smoke-final.log`. `git diff --check` also passes
   was tested by substituting its override before POSIX execution, not by running cmd.exe.
 - UI callbacks drive the real SDK runtime; these are not rendered terminal/pixel tests.
 - The path recognizer remains evidence-based and bounded, not a general shell parser.
+
+## Follow-up: disk persistence before draft cleanup
+
+First merged integration tip `6d93db0` into `fix/handoff-review`, including the
+previous fix and offline-smoke peer-resolution fix. This follow-up changes no spec,
+ticket, credential, or user-environment configuration.
+
+The previous acceptance check proved only branch membership. Pi's real
+`SessionManager._appendEntry()` updates memory before `_persist()` can throw.
+Therefore neither a matching in-memory entry nor a resolved fresh-session send
+establishes that the request was saved.
+
+### Acceptance criteria and red evidence
+
+Oracle: the follow-up requirement to keep durable recovery until the complete
+matching request, including its images, is present in the session file.
+
+| Falsifier | Required result |
+| --- | --- |
+| Move the session directory before recovered-message append | Real `appendMessage()` throws ENOENT; the exact message remains in memory but not on disk. Settlement must retain one recovery file and its image. |
+| File-less Continue | In-memory acceptance must not delete durable recovery. |
+| Disk entry keeps the ID/text but omits the image | Settlement must retain recovery; restoring the complete line allows cleanup. |
+| Fresh destination is file-less | Source recovery remains. |
+| Fresh send resolves with only an in-memory user entry after a failed write | Source recovery remains. |
+| Fresh disk entry omits the image | Source recovery remains. |
+| Fresh input is handled without appending a user message | Source recovery remains. |
+
+Before changing extension source, ran:
+
+```sh
+node --experimental-strip-types --test \
+  --test-name-pattern='Continue retains recovery when persistence|new-session .* preserves source' \
+  tests/handoff-choice.test.mjs
+```
+
+Result: **0 pass / 7 fail**, exit 1. Every case incorrectly deleted recovery
+(`0` files instead of `1`). Log: `/tmp/handoff-persistence-red.log`.
+The ENOENT check uses the real Pi SessionManager and a real directory move, not a
+mocked persistence failure. Fresh-send outcome interception uses the same real
+storage fixture, with controlled command-context callbacks.
+
+### Implementation and green evidence
+
+- At acceptance events, verify the session header and complete serialized entry
+  lines in the actual session file. The full entry comparison includes image data.
+  File-less, missing, unreadable, partial, or nonmatching files do not authorize deletion.
+- No timer or tick reads the session file. Receipt checks run only for a pending
+  acceptance at turn/end/settled events, or once after the replacement send.
+- Replacement cleanup additionally requires newly added user and handoff-context
+  entries on disk. Otherwise retain source recovery and notify the user.
+- The success harness now really appends and persists fresh user/context/assistant
+  entries. It no longer treats an in-memory session or a resolved stub as durable.
+- After the ENOENT reproduction, restore storage, reload the saved source, recover
+  its image, and persist a retry. Only that successful retry clears recovery.
+
+Executed:
+
+```sh
+node --experimental-strip-types --test tests/handoff-choice.test.mjs
+npm test
+node --experimental-strip-types --test .scratch/persistence-compat/tests/*.test.mjs
+npm_config_offline=true npm run smoke
+git diff --check
+```
+
+Results: **21/21** choice tests; **107/107** complete tests on coding-agent 1.1.0;
+**107/107** complete tests on coding-agent 1.0.0 with the installed shared
+dependencies, including pi-ai 1.1.0. All original 100 tests remain. Offline packed
+smoke passes. Logs: `/tmp/handoff-persistence-green.log`,
+`/tmp/handoff-persistence-all.log`, `/tmp/handoff-persistence-1.0.log`, and
+`/tmp/handoff-persistence-smoke.log`. The temporary compatibility copy was removed.
+
+Compatibility minimum is unchanged. This is a complete-file-entry check, not an
+fsync or power-loss guarantee, and it conservatively retains recovery when it cannot
+prove persistence. No paid model request, native Windows test, environment inspection,
+or credential inspection was performed for this follow-up.
