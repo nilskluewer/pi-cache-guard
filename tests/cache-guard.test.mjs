@@ -2,7 +2,7 @@ import assert from "node:assert/strict"
 import test from "node:test"
 
 import {
-  cheaperModels,
+  scopedModelOptions,
   coldCost,
   findLastCacheHit,
   formatAgo,
@@ -15,12 +15,12 @@ import {
 } from "../extensions/cache-guard-logic.ts"
 
 const opus = {
-  provider: "anthropic-vertex", id: "claude-opus-4-8", api: "anthropic-messages", name: "Claude Opus 4.8", contextWindow: 1_000_000,
+  provider: "github-copilot", id: "claude-opus-5.5", api: "anthropic-messages", name: "Claude Opus 5.5", contextWindow: 1_000_000,
   cost: { input: 5, output: 25, cacheRead: 0.5, cacheWrite: 6.25 }, promptCache: { short: 300, long: 3600 },
 }
 const sonnet = { ...opus, id: "claude-sonnet-5", name: "Claude Sonnet 5", cost: { input: 3, output: 15, cacheRead: 0.3, cacheWrite: 3.75 } }
 const sonnetOld = { ...sonnet, id: "claude-sonnet-4-5", name: "Claude Sonnet 4.5" }
-const haiku = { ...opus, id: "claude-haiku-4-5", name: "Claude Haiku 4.5", contextWindow: 200_000, cost: { input: 1, output: 5, cacheRead: 0.1, cacheWrite: 1.25 } }
+const haiku = { ...opus, id: "claude-haiku-5.5", name: "Claude Haiku 5.5", contextWindow: 200_000, cost: { input: 1, output: 5, cacheRead: 0.1, cacheWrite: 1.25 } }
 const otherProvider = { ...haiku, provider: "openai", id: "gpt-mini" }
 
 const usage = (input, cacheRead, cacheWrite) => ({ input, output: 10, cacheRead, cacheWrite })
@@ -42,30 +42,33 @@ test("finds the last request that touched the cache", () => {
   assert.equal(findLastCacheHit([]), undefined)
 })
 
-test("derives warm, cold, and none from the model TTL", () => {
+test("derives estimated windows and explicit unknown from exact supported routes", () => {
   const hit = { at: 0, provider: opus.provider, model: opus.id, promptTokens: 1, cached: true }
   assert.deepEqual(getCacheStatus(opus, hit, "short", 60_000), { state: "warm", remainingMs: 240_000, ttlMs: 300_000 })
   assert.deepEqual(getCacheStatus(opus, hit, "short", 400_000), { state: "cold", expiredForMs: 100_000 })
   assert.deepEqual(getCacheStatus(opus, hit, "long", 400_000), { state: "warm", remainingMs: 3_200_000, ttlMs: 3_600_000 })
   assert.deepEqual(getCacheStatus(haiku, hit, "short", 1), { state: "cold" })
-  assert.deepEqual(getCacheStatus({ ...opus, promptCache: undefined }, { ...hit, cached: false }, "short", 1), { state: "none" })
-  assert.deepEqual(getCacheStatus(opus, undefined, "short", 1), { state: "none" })
+  assert.deepEqual(getCacheStatus({ ...opus, promptCache: undefined }, { ...hit, cached: false }, "short", 1), { state: "unknown" })
+  assert.deepEqual(getCacheStatus(opus, undefined, "short", 1), { state: "unknown" })
+  const gemini = { provider: "github-copilot", id: "gemini-4-argon", api: "openai-completions" }
+  const coldGeminiTurn = { at: 0, provider: gemini.provider, model: gemini.id, promptTokens: 500, cached: false }
+  assert.deepEqual(getCacheStatus(gemini, coldGeminiTurn, "short", 60_000, 900_000), { state: "warm", remainingMs: 840_000, ttlMs: 900_000 })
 })
 
-test("falls back to protocol lifetimes when the catalog has none (GitHub Copilot)", () => {
-  const copilotClaude = { ...opus, provider: "github-copilot", id: "claude-opus-4.8", promptCache: undefined }
-  const copilotGpt = { ...copilotClaude, id: "gpt-6-sol", api: "openai-responses" }
+test("uses declarations before model-specific fallback estimates, never a protocol fallback", () => {
+  const copilotClaude = { ...opus, promptCache: undefined }
+  const copilotGpt = { ...copilotClaude, id: "gpt-6.1-sol", api: "openai-responses" }
   const copilotGemini = { ...copilotClaude, id: "gemini-3.8-flash", api: "openai-completions" }
   const cached = { cached: true }
   assert.equal(resolveTtlMs(copilotClaude, "short", cached), 300_000)
   assert.equal(resolveTtlMs(copilotClaude, "long", cached), 3_600_000)
-  assert.equal(resolveTtlMs(copilotGpt, "long", cached), 300_000)
+  assert.equal(resolveTtlMs(copilotGpt, "long", cached), 1_800_000)
   assert.equal(resolveTtlMs(copilotGemini, "short", cached), undefined)
-  // No cache use observed on this route: do not guess.
   assert.equal(resolveTtlMs(copilotClaude, "short", { cached: false }), undefined)
-  // The catalog always wins.
+  assert.equal(resolveTtlMs({ ...copilotClaude, id: "claude-opus-4.8", promptCache: { short: 300 } }, "short", cached), 300_000)
+  assert.equal(resolveTtlMs({ ...copilotClaude, provider: "anthropic" }, "short", cached), undefined)
   assert.equal(resolveTtlMs({ ...copilotClaude, promptCache: { short: 60, long: 120 } }, "short", cached), 60_000)
-  const hit = { at: 0, provider: "github-copilot", model: "claude-opus-4.8", promptTokens: 1, cached: true }
+  const hit = { at: 0, provider: "github-copilot", model: "claude-opus-5.5", promptTokens: 1, cached: true }
   assert.deepEqual(getCacheStatus(copilotClaude, hit, "long", 600_000), { state: "warm", remainingMs: 3_000_000, ttlMs: 3_600_000 })
 })
 
@@ -75,19 +78,28 @@ test("prices cold and warm sends from the catalog", () => {
   assert.equal(warmCost(opus, 1_000_000).toFixed(2), "0.50")
   const implicit = { ...opus, cost: { input: 2, output: 8, cacheRead: 0.5, cacheWrite: 0 } }
   assert.equal(coldCost(implicit, 1_000_000, "short").toFixed(2), "2.00")
+  const responses = { ...opus, api: "openai-responses", cost: { input: 2, output: 10, cacheRead: .1, cacheWrite: 2.5 } }
+  assert.equal(coldCost(responses, 1_000_000, "long").toFixed(2), "2.50", "OpenAI writes are not Anthropic 1-hour writes")
+  assert.equal(coldCost({ ...opus, compat: { supportsLongCacheRetention: false } }, 1_000_000, "long").toFixed(2), "6.25")
   const tiered = { ...opus, cost: { ...opus.cost, tiers: [{ inputTokensAbove: 200_000, input: 10, output: 50, cacheRead: 1, cacheWrite: 12.5 }] } }
   assert.equal(coldCost(tiered, 1_000_000, "short").toFixed(2), "12.50")
 })
 
-test("offers only supplied scoped models, including equal-price and cross-provider models", () => {
-  const all = [opus, sonnetOld, sonnet, haiku, otherProvider]
-  assert.deepEqual(cheaperModels(opus, all, 100_000, "short").map((x) => x.model.id), ["claude-sonnet-4-5", "claude-sonnet-5", "claude-haiku-4-5", "gpt-mini"])
-  assert.deepEqual(cheaperModels(opus, all, 300_000, "short").map((x) => x.model.id), ["claude-sonnet-4-5", "claude-sonnet-5"])
-  assert.deepEqual(cheaperModels(haiku, all, 100_000, "short"), [])
-  const levels = [5, 4, 3, 2, 1].map((p) => ({ ...opus, id: `m${p}`, cost: { ...opus.cost, cacheWrite: p } }))
-  assert.deepEqual(cheaperModels(opus, levels, 1_000, "short").map((x) => x.model.id), ["m5", "m4", "m3", "m2", "m1"])
-  assert.deepEqual(cheaperModels(opus, [], 100_000, "short"), [])
-  assert.deepEqual(cheaperModels(opus, [haiku], 100_000, "short").map((x) => x.model.id), [haiku.id])
+test("lists all supplied scoped models in scope order, with context-fit reasons", () => {
+  // Oracle: all scoped entries remain visible, regardless of price or context fit.
+  const equal = { ...opus, id: "equal" }
+  const higher = { ...opus, id: "higher", cost: { ...opus.cost, cacheWrite: 12.5 } }
+  const all = [opus, sonnetOld, sonnet, haiku, otherProvider, equal, higher]
+  const entries = scopedModelOptions(all, 300_000, "short")
+  assert.deepEqual(entries.map((x) => x.model), all)
+  assert.equal(entries[0].cost, 1.875)
+  assert.equal(entries[5].cost, 1.875)
+  assert.equal(entries[6].cost, 3.75)
+  assert.match(entries[3].unavailable, /context too large for model: ~300k tokens, limit 200k/)
+  assert.match(entries[4].unavailable, /context too large for model/)
+  assert.equal(entries[0].unavailable, undefined)
+  assert.equal(scopedModelOptions([haiku], 200_000, "short")[0].unavailable, undefined)
+  assert.deepEqual(scopedModelOptions([], 100_000, "short"), [])
 })
 
 test("formats values and reads retention", () => {

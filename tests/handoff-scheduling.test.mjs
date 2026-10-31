@@ -7,20 +7,22 @@ import { SessionManager } from "@earendil-works/pi-coding-agent"
 import extension from "../extensions/cache-guard.ts"
 import { HANDOFF_PROMPT } from "../extensions/handoff.ts"
 
-// Oracle: automatic-session-handoff spec and ticket 02 (known before implementation).
-// Falsifiers: >= threshold, branch/assistant-only costs, early/cold sends,
-// stale lifecycle context, retries, and placement-dependent scheduling.
-const model = { provider: "p", id: "m", name: "M", api: "anthropic-messages", promptCache: { short: 300 },
+// Oracle: CURRENT ACCEPTANCE AMENDMENTS in docs/specs/automatic-session-handoff.md.
+// Independently calculated: cacheWrite $6.25/M × 78,400 = $0.49;
+// 80,000 = $0.50; 81,600 = $0.51. Output/history are not prompt cost.
+// Falsifiers: lifetime-cost eligibility, >= threshold, disabled new-install default,
+// invalid-settings enablement, stale context/model/retention, cold sends and retries.
+const model = { provider: "github-copilot", id: "claude-sonnet-5.5", name: "M", api: "anthropic-messages", promptCache: { short: 300 },
   contextWindow: 200000, cost: { input: 5, output: 25, cacheRead: 0.5, cacheWrite: 6.25 } }
 const usage = (total) => ({ input: 0, output: 0, cacheRead: 100000, cacheWrite: 0, totalTokens: 100000,
   cost: { input: 0, output: 0, cacheRead: total, cacheWrite: 0, total } })
 
-function harness(t, { settings = {}, total = 11, mode = "tui" } = {}) {
+function harness(t, { settings = {}, total = 0.001, tokens = 81600, mode = "tui" } = {}) {
   const root = mkdtempSync(join(tmpdir(), "handoff-scheduler-"))
   const agentDir = join(root, "agent")
   mkdirSync(agentDir)
   const settingsFile = join(agentDir, "cache-guard.json")
-  writeFileSync(settingsFile, JSON.stringify(settings))
+  writeFileSync(settingsFile, typeof settings === "string" ? settings : JSON.stringify(settings))
   const previousDir = process.env.PI_CODING_AGENT_DIR
   process.env.PI_CODING_AGENT_DIR = agentDir
   const previousRetention = process.env.PI_CACHE_RETENTION
@@ -30,14 +32,14 @@ function harness(t, { settings = {}, total = 11, mode = "tui" } = {}) {
   let manager = SessionManager.create(join(root, "workspace"), join(root, "sessions"))
   manager.appendMessage({ role: "user", content: "Work", timestamp: anchor })
   const userLeaf = manager.getLeafId()
-  const warm = (cost = total, at = Date.now()) => manager.appendMessage({ role: "assistant", provider: "p", model: "m",
+  const warm = (cost = total, at = Date.now()) => manager.appendMessage({ role: "assistant", provider: "github-copilot", model: "claude-sonnet-5.5",
     api: "anthropic-messages", content: [{ type: "text", text: "Work done" }], usage: usage(cost), stopReason: "stop", timestamp: at })
   warm()
   let idle = true, pending = false, handlers, command, service
   const sent = [], notes = [], widgets = []
   let ctx = {
     cwd: join(root, "workspace"), mode, hasUI: mode === "tui" || mode === "rpc", model, scopedModels: [], sessionManager: manager,
-    isIdle: () => idle, hasPendingMessages: () => pending, getContextUsage: () => ({ tokens: 100000 }),
+    isIdle: () => idle, hasPendingMessages: () => pending, getContextUsage: () => ({ tokens }),
     ui: { theme: { fg: (_color, text) => text }, setStatus: () => {},
       setWidget: (...args) => widgets.push(args), notify: (...args) => notes.push(args),
       select: async () => undefined, input: async () => undefined },
@@ -69,8 +71,8 @@ function harness(t, { settings = {}, total = 11, mode = "tui" } = {}) {
   return { root, anchor, userLeaf, warm, sent, notes, widgets, emit, load,
     get ctx() { return ctx }, set ctx(value) { ctx = value },
     get manager() { return manager }, get service() { return service }, get command() { return command },
-    set idle(value) { idle = value }, set pending(value) { pending = value },
-    saved: () => JSON.parse(readFileSync(settingsFile, "utf8")),
+    set idle(value) { idle = value }, set pending(value) { pending = value }, set tokens(value) { tokens = value },
+    saved: () => JSON.parse(readFileSync(join(agentDir, "cache-guard", "settings.json"), "utf8")),
     tick: (ms) => t.mock.timers.tick(ms),
     jump: (ms) => { t.mock.timers.setTime(anchor + ms); t.mock.timers.tick(1000) },
     resume: () => { manager = SessionManager.open(manager.getSessionFile()); ctx = { ...ctx, sessionManager: manager }; load() },
@@ -78,53 +80,47 @@ function harness(t, { settings = {}, total = 11, mode = "tui" } = {}) {
   }
 }
 
-for (const total of [9.99, 10, 10.01]) {
-  test(`strict default $10 threshold: total $${total}`, async (t) => {
-    const h = harness(t, { settings: { autoHandoff: true }, total })
+for (const [tokens, cost] of [[78400, 0.49], [80000, 0.50], [81600, 0.51]]) {
+  test(`strict default $0.50 threshold: ${tokens} tokens cost $${cost}`, async (t) => {
+    const h = harness(t, { tokens })
     await h.emit("session_start")
     h.tick(239000)
     assert.equal(h.sent.length, 0, "61 seconds is too early")
     h.tick(1000)
-    assert.equal(h.sent.length, total > 10 ? 1 : 0, "dispatch only above $10, at 60 seconds")
+    assert.equal(h.sent.length, cost > 0.50 ? 1 : 0, "dispatch only above $0.50, at 60 seconds")
   })
 }
 
-test("disabled by default; hidden placement does not disable an opted-in scheduler", async (t) => {
+test("enabled by default; hidden placement does not disable scheduling", async (t) => {
   const h = harness(t, { settings: { placement: "off" } })
   await h.emit("session_start")
   h.tick(240000)
-  assert.equal(h.sent.length, 0)
-  await h.command.handler("handoff on", h.ctx)
-  h.tick(1000)
   assert.equal(h.sent.length, 1)
   assert.deepEqual(h.sent[0], { text: HANDOFF_PROMPT, options: { expandPromptTemplates: false } })
   assert.ok(h.widgets.every(([, content]) => content === undefined))
 })
 
-test("full-session $6 assistant + $1 tool + $2 compaction + $2 abandoned branch = $11", async (t) => {
-  const h = harness(t, { settings: { autoHandoff: true }, total: 0 })
-  h.manager.appendUsage("other", "p", "m", usage(2)) // abandoned, not a cache refresh
-  h.manager.branch(h.userLeaf)
-  h.manager.appendCompaction("Summary", h.userLeaf, 100000, { usage: usage(100) }, false, usage(2))
-  h.manager.appendMessage({ role: "toolResult", toolCallId: "nested", toolName: "lookup", content: [], isError: false,
-    usage: usage(1), details: { usage: usage(100) }, timestamp: Date.now() })
-  h.warm(6)
+test("expensive context with negligible recorded spending dispatches", async (t) => {
+  const h = harness(t, { total: 0 })
   await h.emit("session_start")
   h.tick(240000)
   assert.equal(h.sent.length, 1)
 })
 
-test("standalone and branch summary costs count once; nested details and components do not", async (t) => {
-  const h = harness(t, { settings: { autoHandoff: true }, total: 0 })
-  h.manager.appendUsage("other", "p", "m", usage(4))
-  h.manager.branchWithSummary(h.userLeaf, "Branch summary", { usage: usage(100) }, false, usage(3))
-  h.warm(3) // 4 + 3 + 3 = exactly $10, not $20 by counting cost components again
+test("cheap compacted context does not inherit expensive history or abandoned branches", async (t) => {
+  const h = harness(t, { total: 600, tokens: 1600 }) // current context costs $0.01
+  h.manager.appendUsage("other", "p", "m", usage(200))
+  h.manager.branchWithSummary(h.userLeaf, "Branch summary", {}, false, usage(300))
+  h.manager.appendCompaction("Summary", h.userLeaf, 100000, {}, false, usage(200))
+  h.manager.appendMessage({ role: "toolResult", toolCallId: "nested", toolName: "lookup", content: [], isError: false,
+    usage: usage(100), details: { usage: usage(1000) }, timestamp: Date.now() })
+  h.warm(600)
   await h.emit("session_start")
   h.tick(240000)
   assert.equal(h.sent.length, 0)
-  await h.command.handler("handoff threshold 9.99", h.ctx)
+  h.tokens = 81600
   h.tick(1000)
-  assert.equal(h.sent.length, 1)
+  assert.equal(h.sent.length, 1, "only the current estimate changes eligibility")
 })
 
 for (const block of ["busy", "pending", "cold", "sleep", "changed session", "changed model", "disabled", "threshold", "compaction"]) {
@@ -167,7 +163,7 @@ test("busy/pending can become eligible before expiry using the latest lifecycle 
 })
 
 // Inject state changes at the last idle check, after the timer's first observation.
-for (const race of ["busy", "pending", "model", "branch", "expiry", "settings"]) {
+for (const race of ["busy", "pending", "model", "model price", "tokens", "invalid tokens", "unknown tokens", "retention", "branch", "expiry", "settings"]) {
   test(`dispatch-time recheck rejects a ${race} race`, async (t) => {
     const h = harness(t, { settings: { autoHandoff: true } })
     const idle = h.ctx.isIdle
@@ -177,6 +173,11 @@ for (const race of ["busy", "pending", "model", "branch", "expiry", "settings"])
       calls++
       if (race === "busy") return calls === 1
       if (race === "model") h.ctx.model = { ...model, id: "other" }
+      if (race === "model price") h.ctx.model = { ...model, cost: { ...model.cost, cacheWrite: 1 } }
+      if (race === "tokens") h.tokens = 80000
+      if (race === "invalid tokens") h.tokens = NaN
+      if (race === "unknown tokens") h.tokens = undefined
+      if (race === "retention") process.env.PI_CACHE_RETENTION = "long"
       if (race === "branch") h.manager.branch(h.userLeaf)
       if (race === "expiry") t.mock.timers.setTime(h.anchor + 300000)
       // handler is synchronous until its resolved return; no awaited dialog for off.
@@ -190,34 +191,58 @@ for (const race of ["busy", "pending", "model", "branch", "expiry", "settings"])
 }
 
 test("UI changes policy without changing budget/placement; threshold alone does not enable", async (t) => {
-  const h = harness(t, { settings: { budgetUsd: 0.75, placement: "below" } })
+  const h = harness(t, { settings: { autoHandoff: false, budgetUsd: 0.75, placement: "below" } })
   await h.command.handler("handoff threshold 0", h.ctx)
   await h.emit("session_start")
   h.tick(240000)
   assert.equal(h.sent.length, 0)
-  h.ctx.ui.select = async (_title, options) => options.find((item) => item.startsWith("On ·"))
+  h.ctx.ui.select = async (_title, options) => options.find((item) => item.startsWith("Automatic handoff ·"))
   await h.command.handler("handoff", h.ctx)
   assert.equal(h.saved().autoHandoff, true)
-  h.ctx.ui.select = async (_title, options) => options.find((item) => item.startsWith("Threshold ·"))
+  h.ctx.ui.select = async (_title, options) => options.find((item) => item.startsWith("Handoff threshold ·"))
   h.ctx.ui.input = async () => "12.50"
   await h.command.handler("handoff", h.ctx)
-  assert.deepEqual(h.saved(), { budgetUsd: 0.75, placement: "below", autoHandoff: true, handoffThresholdUsd: 12.5 })
+  assert.deepEqual(h.saved(), { budgetUsd: 0.75, placement: "below", autoHandoff: true, handoffColdCostThresholdUsd: 12.5 })
   h.tick(1000)
   assert.equal(h.sent.length, 0)
   h.ctx.ui.input = async () => undefined
   await h.command.handler("handoff threshold", h.ctx)
-  assert.equal(h.saved().handoffThresholdUsd, 12.5)
+  assert.equal(h.saved().handoffColdCostThresholdUsd, 12.5)
 })
 
-test("invalid saved policy uses disabled/$10 defaults, and valid policy reloads", async (t) => {
-  const h = harness(t, { settings: { autoHandoff: "true", handoffThresholdUsd: -1 }, total: 10 })
+for (const settings of ["{bad json", null, [], 42, { autoHandoff: "true" },
+  { autoHandoff: true, handoffColdCostThresholdUsd: -1 }, { handoffColdCostThresholdUsd: "0" },
+  { budgetUsd: "0.1" }, { placement: "bad" }]) {
+  test(`malformed settings fail disabled: ${JSON.stringify(settings)}`, async (t) => {
+    const h = harness(t, { settings })
+    await h.emit("session_start")
+    h.tick(240000)
+    assert.equal(h.sent.length, 0)
+  })
+}
+
+for (const autoHandoff of [undefined, false, true]) {
+  test(`legacy threshold is not reinterpreted; saved preference ${autoHandoff}`, async (t) => {
+    const h = harness(t, { settings: { autoHandoff, handoffThresholdUsd: 100, budgetUsd: 0.75, placement: "below" } })
+    await h.emit("session_start")
+    h.tick(240000)
+    assert.equal(h.sent.length, autoHandoff === false ? 0 : 1)
+    const completion = h.command.getArgumentCompletions("handoff th")[0]
+    assert.match(completion.description, /current.context.*\$0\.50/i)
+    await h.command.handler("handoff threshold 0.75", h.ctx)
+    assert.equal(h.saved().handoffColdCostThresholdUsd, 0.75)
+    assert.equal(h.saved().budgetUsd, 0.75)
+    assert.equal(h.saved().placement, "below")
+  })
+}
+
+test("valid new threshold reloads independently from legacy threshold and cold-send budget", async (t) => {
+  const h = harness(t, { settings: { autoHandoff: true, handoffThresholdUsd: 0, handoffColdCostThresholdUsd: 0.51,
+    budgetUsd: 0.001, placement: "off" } })
   await h.emit("session_start")
   h.tick(240000)
-  assert.equal(h.sent.length, 0)
-  await h.command.handler("handoff on", h.ctx)
-  h.tick(1000)
-  assert.equal(h.sent.length, 0, "invalid threshold must not become zero")
-  await h.command.handler("handoff threshold 9", h.ctx)
+  assert.equal(h.sent.length, 0, "exactly the saved new threshold")
+  await h.command.handler("handoff threshold 0.50", h.ctx)
   await h.emit("session_shutdown", { reason: "reload" })
   h.load()
   await h.emit("session_start", { reason: "reload" })
@@ -289,11 +314,11 @@ test("settings UI, completions, validation, persistence, and budget/placement pr
   for (const bad of ["-1", "NaN", "Infinity", "1e309", "nope"]) {
     await h.command.handler(`handoff threshold ${bad}`, h.ctx)
     assert.equal(h.notes.at(-1)[1], "error")
-    assert.equal(h.saved().handoffThresholdUsd, 12.5)
+    assert.equal(h.saved().handoffColdCostThresholdUsd, 12.5)
   }
   await h.command.handler("budget 0.5", h.ctx)
   await h.command.handler("off", h.ctx)
-  assert.deepEqual(h.saved(), { budgetUsd: 0.5, placement: "off", autoHandoff: true, handoffThresholdUsd: 12.5 })
+  assert.deepEqual(h.saved(), { budgetUsd: 0.5, placement: "off", autoHandoff: true, handoffColdCostThresholdUsd: 12.5 })
   assert.ok(h.command.getArgumentCompletions("hand").some((item) => item.value === "handoff"))
   assert.ok(h.command.getArgumentCompletions("handoff ").some((item) => item.value === "handoff on"))
   assert.ok(h.command.getArgumentCompletions("handoff th").some((item) => item.value === "handoff threshold"))
@@ -301,13 +326,33 @@ test("settings UI, completions, validation, persistence, and budget/placement pr
   const menus = []
   h.ctx.ui.select = async (title, options) => { menus.push({ title, options }); return options.find((item) => item.startsWith("Automatic handoff")) }
   await h.command.handler("", h.ctx)
-  assert.match(menus[0].options.join("\n"), /on.*12\.50/)
-  assert.match(menus[1].title, /handoff/i)
+  assert.equal(menus.length, 1, "handoff preferences must not open a second menu")
+  assert.match(menus[0].options.find((item) => item.startsWith("Automatic handoff ·")), /on.*turn off/)
+  assert.match(menus[0].options.find((item) => item.startsWith("Handoff threshold ·")), /12\.50/)
   await h.command.handler("handoff off", h.ctx)
   await h.command.handler("handoff threshold 0", h.ctx)
   assert.equal(h.saved().autoHandoff, false)
-  assert.equal(h.saved().handoffThresholdUsd, 0)
+  assert.equal(h.saved().handoffColdCostThresholdUsd, 0)
 })
+
+for (const tokens of [0, -1, NaN, Infinity]) {
+  test(`invalid context size ${tokens} cannot dispatch even at a zero threshold`, async (t) => {
+    const h = harness(t, { tokens, settings: { autoHandoff: true, handoffColdCostThresholdUsd: 0 } })
+    await h.emit("session_start")
+    h.tick(240000)
+    assert.equal(h.sent.length, 0)
+  })
+}
+
+for (const price of [NaN, Infinity, -1, 0]) {
+  test(`invalid/zero context cost ${price} cannot dispatch`, async (t) => {
+    const h = harness(t, { settings: { autoHandoff: true, handoffColdCostThresholdUsd: 0 } })
+    h.ctx.model = { ...model, cost: { ...model.cost, input: price, cacheWrite: price } }
+    await h.emit("session_start")
+    h.tick(240000)
+    assert.equal(h.sent.length, 0)
+  })
+}
 
 for (const mode of ["rpc", "json", "print"]) {
   test(`no automatic sends in ${mode} mode`, async (t) => {

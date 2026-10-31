@@ -7,12 +7,16 @@ import { tmpdir } from "node:os"
 import { basename, dirname, extname, isAbsolute, join, relative, resolve, sep } from "node:path"
 import { getAgentDir, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent"
 
+import { cacheGuardDir } from "./cache-storage.ts"
+
 export const HANDOFF_ENTRY_TYPE = "cache-guard.handoff"
 export const HANDOFF_PROMPT = `Write a handoff document summarising the current conversation so a fresh agent can continue the work. Save to the temporary directory of the user's OS ($TMPDIR, else /tmp; %TEMP% on Windows) - not the current workspace.
 
-Include a "suggested skills" section in the document, naming which skills the next agent should call the Skill tool for.
+Include a "used skills" section in the document, naming which skills the previous agent used.
 
-Do not duplicate content already captured in other artifacts (specs, plans, ADRs, issues, commits, diffs). Reference them by path or URL instead.
+Do not duplicate content already captured in other artifacts (specs, plans, ADRs, issues, commits, diffs). Reference them by path or URL instead. Include important paths to proceed the conversation. Make a list of Paths used relevant.
+
+If there was a Goal / North Star set, repeat it word by word. If there was a change in plan - document why this change happend and the reasons behind it.
 
 Redact any sensitive information, such as API keys, passwords, or personally identifiable information.
 
@@ -105,7 +109,9 @@ export function createHandoffService(pi: ExtensionAPI, options: HandoffOptions =
     TMPDIR: options.tempDir ?? (process.env.TMPDIR || "/tmp"),
     TEMP: options.tempDir ?? (process.env.TEMP ?? tmpdir()),
   }
-  const durableDir = join(resolve(options.agentDir ?? getAgentDir()), "handoffs")
+  const agentDir = resolve(options.agentDir ?? getAgentDir())
+  const durableDir = join(cacheGuardDir(agentDir), "handoffs")
+  const legacyDir = join(agentDir, "handoffs")
   const memory = new Map<string, HandoffState>()
   type Active = {
     state: HandoffState; started: boolean; evidence: Map<string, string>; existingTempNames: Set<string>
@@ -119,7 +125,14 @@ export function createHandoffService(pi: ExtensionAPI, options: HandoffOptions =
     confirmationTimer = undefined
   }
 
-  const notify = (ctx: ExtensionContext, message: string, level: "info" | "error") => ctx.ui.notify(message, level)
+  const notify = (ctx: ExtensionContext, message: string, level: "info" | "error") => {
+    // A broken display must never roll back a verified file or ready metadata.
+    try { ctx.ui.notify(message, level) } catch { /* State and artifacts remain authoritative. */ }
+  }
+  const workingMessage = (ctx: ExtensionContext, message?: string) => {
+    // Display-only: unsupported or failed UI updates must not affect publication.
+    try { ctx.ui.setWorkingMessage?.(message) } catch { /* Keep generation and storage independent of UI. */ }
+  }
   const getState = (ctx: ExtensionContext): HandoffState | undefined => {
     const id = ctx.sessionManager.getSessionId()
     let state = memory.get(id)
@@ -141,6 +154,7 @@ export function createHandoffService(pi: ExtensionAPI, options: HandoffOptions =
     active = undefined
     const failed: HandoffState = { ...state, status: "failed", error: reason }
     try { persist(failed) } catch { memory.set(state.source.sessionId, failed) }
+    workingMessage(ctx)
     notify(ctx, `Handoff failed: ${reason}. No automatic retry.`, "error")
   }
   const belongs = (ctx: ExtensionContext) => active?.state.source.sessionId === ctx.sessionManager.getSessionId()
@@ -158,7 +172,9 @@ export function createHandoffService(pi: ExtensionAPI, options: HandoffOptions =
       if (state?.status !== "ready") return undefined
       try {
         const path = state.artifact.path
-        if (!within(realpathSync(durableDir), realpathSync(path)) || within(canonical(ctx.cwd), realpathSync(path))) return undefined
+        // Unowned/mixed legacy directories are not moved. Keep their verified artifacts usable.
+        const roots = [durableDir, legacyDir].flatMap(root => { try { return [realpathSync(root)] } catch { return [] } })
+        if (!roots.some(root => within(root, realpathSync(path))) || within(canonical(ctx.cwd), realpathSync(path))) return undefined
         if (readMarkdown(path).sha256 !== state.artifact.sha256) return undefined
         return state.artifact
       } catch { return undefined }
@@ -210,6 +226,7 @@ export function createHandoffService(pi: ExtensionAPI, options: HandoffOptions =
     }
     clearConfirmation()
     active.started = true
+    workingMessage(ctx, "Preparing handoff…")
   })
   pi.on("tool_call", (event, ctx) => {
     if (!active?.started || !belongs(ctx)) return
@@ -292,7 +309,8 @@ export function createHandoffService(pi: ExtensionAPI, options: HandoffOptions =
       if (readMarkdown(path).sha256 !== sha256) throw new Error("Durable file verification failed")
       const artifact: HandoffArtifact = { path, sha256, source, createdAt, completedLeafId }
       persist({ ...run.state, status: "ready", artifact, completedLeafId })
-      notify(ctx, `Handoff saved: ${path}`, "info")
+      workingMessage(ctx)
+      notify(ctx, 'A handoff was created while you were away. Send a message to continue; when the cold-cache dialog appears, select "New session with saved handoff" to use it.', "info")
     } catch (error) {
       for (const path of [staging, published]) {
         if (path) { try { unlinkSync(path) } catch { /* Never remove unrelated files. */ } }

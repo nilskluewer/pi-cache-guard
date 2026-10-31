@@ -35,7 +35,7 @@ if (extensions.length === 0) fail("package.json has no pi.extensions entry")
 const args = ["--mode", "rpc", "--offline", "--no-session", "--no-extensions", "--no-skills", "--no-prompt-templates", "--no-themes", "--no-context-files"]
 for (const extension of extensions) args.push("-e", extension)
 
-const child = spawn("pi", args, { cwd: tmp, stdio: ["pipe", "pipe", "pipe"] })
+const child = spawn("pi", args, { cwd: tmp, env: { ...process.env, PI_CODING_AGENT_DIR: join(tmp, "agent") }, stdio: ["pipe", "pipe", "pipe"] })
 let output = ""
 let done = false
 const finish = (error) => {

@@ -1,5 +1,69 @@
 # Optional automatic handoff before prompt-cache expiry
 
+## Current acceptance amendments
+
+The user's latest instructions replace the original session-total policy and
+cheaper-only chooser policy below. The remaining original requirements still apply.
+
+- Pi's valid `model.promptCache[active retention tier]` declaration is the countdown
+  baseline, including model overrides and custom providers. Keep local duration
+  evidence independent; use it for the countdown only without a declaration.
+- Native `cacheWarming: "idle"` owns background cache work. Pause automatic
+  handoff without changing the saved preference, even after a native cost-based
+  stop, missing lifetime, refresh failure, or safety-limit stop. Do not override
+  Pi's warming decision or replicate its scheduler. Native `off` and `streaming`
+  retain the existing idle handoff policy. Respect global-only warming settings;
+  unreadable/invalid warming settings fail closed for unattended generation.
+  Native refresh usage counts toward session totals and updates the countdown,
+  but does not enter model context or train a normal assistant-turn sample.
+- Automatic handoff is **on by default** when no on/off preference is saved.
+  Preserve valid explicit on/off choices. Malformed settings fail closed rather
+  than enable unattended spending. Generation and tools can incur costs.
+- Eligibility uses the existing **estimated cold prompt/cache cost of the current
+  context**, current model, and retention setting. The default threshold is
+  **$0.50 USD**, with a strict `cost > threshold` comparison. Lifetime spending,
+  output costs, abandoned-branch usage, and historical compaction costs are not
+  part of this estimate. A small post-compaction context must not dispatch merely
+  because earlier session spending was high.
+- Reuse `inspect()` and `coldCost()`; keep the separate cold-send warning budget.
+  Require known, finite positive **current** context size and a finite nonnegative
+  cost. Historical cache-token fallback may inform the old warning, but must not
+  authorize unattended generation when current context usage is unknown. Recompute
+  current context cost during the final dispatch recheck. Preserve the positive
+  remaining cache lifetime of at most 60 seconds, idle/pending checks, current
+  model route, unchanged prompt, once-per-session guard, and no cold catch-up.
+- Persist the new estimate threshold as `handoffColdCostThresholdUsd`. The old
+  `handoffThresholdUsd` was lifetime spending and must not be reinterpreted.
+  Legacy configurations use the new $0.50 default unless a valid new threshold
+  is saved; preserve explicit `autoHandoff`, budget, and placement. Settings
+  labels, notifications, and completions must describe current-context cost.
+- The chooser shows **all scoped models**, with cost estimates and context-limit
+  reasons. The current model is represented by Continue. Selecting a context-
+  ineligible model must not switch/send and must reopen the chooser.
+- The user prefers a concise handoff status/completion message instead of raw
+  generation chat. Full run hiding is currently unavailable through supported
+  Pi extension APIs. Keep full history and the original generation route; use
+  only supported display improvements, and report this limitation honestly.
+  Set `Preparing handoff…` as the working label during generation and retain the
+  configured label across continuations. Pi may show its own retry indicator
+  during retry delays. Reset the label after success, failure, or interruption.
+  Failed display updates or completion notifications must not remove verified
+  durable output or change ready metadata.
+- `/cache-guard` opens one flat settings menu: cold-send budget, handoff on/off,
+  handoff threshold, and all countdown placements. Toggle handoff directly; edit
+  amounts through an input, not a preferences submenu. A selection applies one
+  change and returns. `/cache-guard handoff` without arguments is an alias for
+  the same menu. Preserve direct argument commands and existing validation.
+
+Acceptance checks derive from these amendments: prices below, exactly at, and
+above $0.50; cheap current context after expensive compaction/history; expensive
+current context with negligible recorded spending; context/model/retention races;
+new-install enabled default; preserved saved off and legacy settings; invalid
+settings; and existing timing, one-shot, artifact, and chooser safety checks.
+Use hand-calculated fixture costs as the oracle before source changes.
+
+## Original design (historical where superseded above)
+
 ## Problem Statement
 
 A user returns to a costly Pi session after its prompt cache has expired. Continuing the session can require an expensive cold-cache prompt write. The user wants to preserve the full conversation, but also wants a cheaper way to resume in a fresh session.

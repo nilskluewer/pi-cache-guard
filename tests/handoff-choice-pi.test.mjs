@@ -10,7 +10,7 @@ import { createAgentSessionRuntime, createAgentSessionServices, createAgentSessi
 import extension from "../extensions/cache-guard.ts"
 
 // Real Pi prompt → registered command → runtime invalidation/reload → fresh withSession.
-// No provider HTTP implementation is registered for this model. All responses are local.
+// The registered stream override returns every response locally; no HTTP is used.
 test("real Pi runtime replaces through command dispatch with a controlled offline provider", { timeout: 15000 }, async (t) => {
   const root = mkdtempSync(join(tmpdir(), "handoff-real-pi-"))
   t.after(() => rmSync(root, { recursive: true, force: true }))
@@ -25,9 +25,9 @@ test("real Pi runtime replaces through command dispatch with a controlled offlin
   const settings = SettingsManager.inMemory({ compaction: { enabled: false }, retry: { enabled: false }, cacheWarming: { enabled: false } })
   const modelRuntime = await ModelRuntime.create({ authPath: join(agentDir, "auth.json"), modelsPath: null,
     modelsStorePath: join(agentDir, "catalog.json"), allowModelNetwork: false, refreshOnCreate: false })
-  const provider = "cache-guard-offline-fixture"
-  modelRuntime.registerProvider(provider, { api: "handoff-fixture-api", baseUrl: "http://127.0.0.1:1", apiKey: "not-a-real-key",
-    models: [{ id: "fixture", name: "Offline fixture", reasoning: false, input: ["text", "image"], contextWindow: 200000,
+  const provider = "github-copilot"
+  modelRuntime.registerProvider(provider, { api: "anthropic-messages", baseUrl: "http://127.0.0.1:1", apiKey: "not-a-real-key",
+    models: [{ id: "claude-sonnet-5.5", name: "Offline fixture", reasoning: false, input: ["text", "image"], contextWindow: 200000,
       maxTokens: 1000, promptCache: { short: 300, long: 300 }, cost: { input: 5, output: 25, cacheRead: .5, cacheWrite: 6.25 } }],
     streamSimple: (model, context) => {
       requests.push(structuredClone(context.messages))
@@ -39,7 +39,7 @@ test("real Pi runtime replaces through command dispatch with a controlled offlin
       queueMicrotask(() => { stream.push({ type: "start", partial: message }); stream.push({ type: "done", reason: "stop", message }); stream.end() })
       return stream
     } })
-  const model = modelRuntime.getModel(provider, "fixture")
+  const model = modelRuntime.getModel(provider, "claude-sonnet-5.5")
   assert.ok(model)
   const manager = SessionManager.create(cwd, join(root, "sessions"))
   manager.appendMessage({ role: "user", content: "Original long task", timestamp: 0 })

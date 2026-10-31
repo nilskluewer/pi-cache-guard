@@ -3,6 +3,7 @@ import { mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node
 import { join } from "node:path"
 import { getAgentDir, type ExtensionAPI, type ExtensionContext, type InputEvent, type SessionEntry } from "@earendil-works/pi-coding-agent"
 import type { HandoffArtifact, HandoffService } from "./handoff.ts"
+import { cacheGuardDir } from "./cache-storage.ts"
 
 const BRIDGE = "cache-guard-resume"
 type Pending = Pick<InputEvent, "text" | "images">
@@ -43,7 +44,7 @@ function persisted(ctx: ExtensionContext, entries: SessionEntry[]): boolean {
 export function createHandoffChooser(pi: ExtensionAPI, handoff: HandoffService, agentDir = getAgentDir()) {
   const transitions = new Map<string, { sessionId: string; pending: Pending; artifact: HandoffArtifact }>()
   const memoryDrafts = new Map<string, Pending>()
-  const draftsDir = join(agentDir, "cache-guard-drafts")
+  const draftsDir = join(cacheGuardDir(agentDir), "drafts")
   const draftPath = (sessionId: string) => join(draftsDir, createHash("sha256").update(sessionId).digest("hex") + ".json")
   const readDraft = (ctx: ExtensionContext): Pending | undefined => {
     const sessionId = ctx.sessionManager.getSessionId?.()

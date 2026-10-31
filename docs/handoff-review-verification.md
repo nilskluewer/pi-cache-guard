@@ -1,5 +1,83 @@
 # Handoff review fixes: verification
 
+## Latest follow-up: current-context cost, default on, and flat settings
+
+Oracle: the **Current acceptance amendments** in
+`docs/specs/automatic-session-handoff.md`, based on the user's approval of an
+estimated current-context cold prompt/cache cost threshold of **$0.50 USD**,
+default-on generation, and one settings menu. These amendments replace the
+original session-total and disabled-default expectations.
+
+The scheduler now reuses current model pricing and retention, with strict
+`cost > threshold`. Known finite positive current context usage is required.
+Historical cache-token fallback remains available to the existing cold warning,
+but cannot authorize automatic spending. Saved on/off preferences take priority;
+malformed settings fail disabled. The new saved threshold key is
+`handoffColdCostThresholdUsd`; the legacy lifetime-spending key is not reused.
+The unused lifetime-cost helper remains on disk: a permission gate rejected its
+removal, and the deletion was not retried. Production no longer imports it.
+
+### Executed discriminating checks
+
+| Check | Red evidence before its production change | Green evidence |
+| --- | --- | --- |
+| Current cost rather than lifetime spending; new enabled default | Implementer reported 13/54 amended scheduling checks failed; offline real-Pi cases also observed missing default dispatch at $0.51 and incorrect dispatch for cheap contexts with expensive history. | Scheduler seam covers $0.49/$0.50/$0.51, token/model-price/retention races, saved off, legacy/new settings, invalid values, lifecycle and one-shot guards. Real Pi confirms unchanged prompt, built-in write, verified ready publication, and no generation for $0.01 post-compaction context despite $120 history. |
+| Unknown current context cannot use old token counts | Real Pi context-usage boundary injected missing usage or null tokens with a recorded 81,600-token cache hit: 2/2 checks incorrectly appended dispatch state. | Both make no dispatch/provider request; final-check unknown-token race also passes. |
+| Completion display failure cannot undo saved output | Real Pi completion-notification callback threw after built-in write: metadata incorrectly became failed instead of ready. | Ready metadata and durable content survive; no failure notification or runtime error. |
+| Working label and reset | 4/5 lifecycle checks failed before the label implementation. | Callback checks cover generation, retries, continuations, exhausted retries, shutdown/branch/abort interruptions, and throwing display callbacks. Pi can display its own retry indicator during delays; callback history is not pixel evidence. |
+| One flat settings menu | Real `session.prompt('/cache-guard')` checks: 14/15 failed against nested settings. | 15/15 check direct toggle, direct amount inputs, every countdown placement, cancellation, preservation of unrelated settings, and `/cache-guard handoff` opening the same menu. No model requests. |
+
+An independent read-only review found the unknown-context and notification faults;
+both were reproduced through the real offline runtime before fixes. It also
+identified the host retry-indicator limitation, which is now stated explicitly.
+No tool-output/thinking global preferences were changed. Full generation hiding
+is still unavailable through the supported API; the original transcript remains.
+
+Final executed checks: `npm test` (**162 passed**, zero failed/skipped),
+`npm_config_offline=true npm run smoke` (passed), and `git diff --check` (passed).
+Latest full-suite log: `/tmp/pi-cache-guard-context-cost-tests.log`.
+Flat-menu baseline log: `/tmp/cache-guard-settings-baseline.log`.
+
+Limits: controlled offline providers and real SDK/UI callbacks, not live-provider
+or rendered-terminal acceptance. The latest changes have not been run against
+Pi 1.0.0. Changes are uncommitted on `feat/automatic-session-handoff`; no personal
+settings, stored handoffs, source sessions, or user-owned untracked files were
+modified. No release publication was performed.
+
+## Earlier follow-up: all scoped models and completion notice
+
+Oracle: the user requested that the cold-cache dialog omit no scoped models and
+show a reason when a model cannot fit the current context. This replaces the
+previous cheaper-only selection policy. The current model remains represented
+by Continue; all other scoped entries appear in scope order with estimated costs.
+
+Before production changes, the four new checks in
+`tests/scoped-selection-pi.test.mjs` failed through real Pi `session.prompt()`:
+equal-price entries were absent; selecting a too-small entry did not reopen the
+dialog; selecting equal-price and higher-price entries made no provider request.
+
+After the change, all four pass. The controlled offline runtime checks every
+scoped entry (including current and cross-provider models), known price estimates,
+context-limit explanations, no switch/send on a blocked selection, Cancel text
+preservation, and exactly one send with the selected scoped thinking level.
+The selector has no disabled-row API, so selecting an unavailable row notifies
+the user and reopens the dialog without consuming the pending request.
+
+The completion notice now explains how to use the saved handoff, and remains
+strictly after durable publication and ready metadata. Installed Pi has no
+supported run-level visibility API: generation still appears in the old chat.
+Hiding a custom input alone does not hide assistant streams or tool rows.
+No stored handoff or source-session artifact was edited.
+
+Executed after both changes: `npm test` (**111 passed**, none failed/skipped),
+`npm_config_offline=true npm run smoke` (passed), and `git diff --check` (passed).
+These are controlled SDK/UI-callback checks, not live-provider or rendered-terminal
+acceptance. The new runtime checks have not been run against Pi 1.0.0.
+
+At this earlier checkpoint, current-context-cost scheduling was still awaiting
+threshold agreement. The latest section above records its implementation.
+The original verification below describes the earlier session-total policy.
+
 ## Scope and oracle
 
 Branch: `fix/handoff-review`, based on integration commit `d3b1a05`.

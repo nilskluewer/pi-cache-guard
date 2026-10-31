@@ -1,5 +1,6 @@
 import type { Api, Model, Usage } from "@earendil-works/pi-ai"
 import { calculateCost } from "@earendil-works/pi-ai"
+import { getSeedEstimate } from "./cache-learning.ts"
 
 export type Retention = "short" | "long"
 
@@ -15,6 +16,7 @@ export interface CacheHit {
 
 export type CacheStatus =
   | { state: "none" }
+  | { state: "unknown" }
   | { state: "warm"; remainingMs: number; ttlMs: number }
   | { state: "cold"; expiredForMs?: number }
 
@@ -27,31 +29,18 @@ export function getRetention(env: Record<string, string | undefined> = process.e
 
 export function getTtlMs(model: Pick<Model<Api>, "promptCache">, retention: Retention): number | undefined {
   const seconds = model.promptCache?.[retention]
-  return seconds && seconds > 0 ? seconds * 1000 : undefined
+  return typeof seconds === "number" && Number.isFinite(seconds) && seconds > 0 && Number.isFinite(seconds * 1000)
+    ? seconds * 1000 : undefined
 }
 
-/**
- * Cache lifetimes in seconds per API protocol, from the provider docs (conservative end).
- * Used only when Pi's catalog declares no `promptCache` (for example GitHub Copilot)
- * and the last request reported cache use. Keyed by protocol, so new models need no change.
- */
-export const API_CACHE_FALLBACK: Readonly<Record<string, { short: number; long: number }>> = {
-  // Anthropic: 5 min default, 1 h with extended retention.
-  "anthropic-messages": { short: 300, long: 3600 },
-  // OpenAI: cached prefixes stay 5–10 min after the last use (best effort).
-  "openai-responses": { short: 300, long: 300 },
-}
-
-/** Catalog lifetime first; otherwise the protocol fallback when the route proved it caches. */
+/** A declaration takes priority over route seeds. Neither one proves a cache hit. */
 export function resolveTtlMs(
-  model: Pick<Model<Api>, "api" | "promptCache">,
+  model: Pick<Model<Api>, "provider" | "id" | "api" | "promptCache" | "compat">,
   retention: Retention,
   hit: Pick<CacheHit, "cached"> | undefined,
 ): number | undefined {
-  const declared = getTtlMs(model, retention)
-  if (declared !== undefined || !hit?.cached) return declared
-  const fallback = API_CACHE_FALLBACK[model.api]?.[retention]
-  return fallback ? fallback * 1000 : undefined
+  if (!hit?.cached) return undefined
+  return getTtlMs(model, retention) ?? getSeedEstimate(model, retention).ttlMs
 }
 
 export function promptTokens(usage: Pick<Usage, "input" | "cacheRead" | "cacheWrite"> | undefined): number {
@@ -71,7 +60,8 @@ export function findLastCacheHit(entries: readonly Entry[]): CacheHit | undefine
     if (entry.type === "usage" && entry.kind === "cache_warm") {
       const tokens = promptTokens(entry.usage)
       if (tokens > 0) {
-        return { at: Date.parse(entry.timestamp ?? ""), provider: entry.provider, model: entry.model, promptTokens: tokens, cached: true }
+        return { at: Date.parse(entry.timestamp ?? ""), provider: entry.provider, model: entry.model, promptTokens: tokens,
+          cached: (entry.usage.cacheRead ?? 0) + (entry.usage.cacheWrite ?? 0) > 0 }
       }
     }
     if (entry.type === "message" && entry.message?.role === "assistant") {
@@ -94,13 +84,15 @@ export function getCacheStatus(
   hit: CacheHit | undefined,
   retention: Retention,
   now: number,
+  estimatedTtlMs?: number,
 ): CacheStatus {
-  const ttl = resolveTtlMs(model, retention, hit)
-  if (ttl === undefined || !hit || !Number.isFinite(hit.at)) return { state: "none" }
+  const ttl = getTtlMs(model, retention) ?? estimatedTtlMs ?? resolveTtlMs(model, retention, hit)
+  const implicitWrite = estimatedTtlMs !== undefined && model.api !== "anthropic-messages"
+  if (ttl === undefined || !hit || (!hit.cached && !implicitWrite) || !Number.isFinite(hit.at)) return { state: "unknown" }
   // Prompt caches are per model: a model change always starts cold.
   if (hit.provider !== model.provider || hit.model !== model.id) return { state: "cold" }
   const remainingMs = hit.at + ttl - now
-  return remainingMs > 0 ? { state: "warm", remainingMs, ttlMs: ttl } : { state: "cold", expiredForMs: -remainingMs }
+  return remainingMs > 0 ? { state: "warm", remainingMs, ttlMs: ttl } : { state: "cold", expiredForMs: Math.max(0, -remainingMs) }
 }
 
 function emptyUsage(): Usage {
@@ -120,7 +112,7 @@ export function coldCost(model: Model<Api>, tokens: number, retention: Retention
   usage.totalTokens = tokens
   if (model.cost.cacheWrite > 0) {
     usage.cacheWrite = tokens
-    if (retention === "long") usage.cacheWrite1h = tokens
+    if (retention === "long" && model.api === "anthropic-messages" && model.compat?.supportsLongCacheRetention !== false) usage.cacheWrite1h = tokens
   } else {
     // Implicit caches (OpenAI, Gemini) bill a miss as normal input.
     usage.input = tokens
@@ -136,19 +128,18 @@ export function warmCost(model: Model<Api>, tokens: number): number {
   return calculateCost(model, usage).total
 }
 
-/** All cheaper scoped models that fit the context, without catalog substitutions. */
-export function cheaperModels(
-  current: Model<Api>,
+/** Every scoped model, in scope order. Ineligible models stay visible with a reason. */
+export function scopedModelOptions(
   scoped: readonly Model<Api>[],
   tokens: number,
   retention: Retention,
-): { model: Model<Api>; cost: number }[] {
-  const currentCost = coldCost(current, tokens, retention)
-  return scoped
-    .filter((model) => !(model.provider === current.provider && model.id === current.id) && model.contextWindow >= tokens)
-    .map((model) => ({ model, cost: coldCost(model, tokens, retention) }))
-    .filter((entry) => entry.cost < currentCost)
-    .sort((a, b) => b.cost - a.cost)
+): { model: Model<Api>; cost: number; unavailable?: string }[] {
+  return scoped.map((model) => ({
+    model,
+    cost: coldCost(model, tokens, retention),
+    unavailable: model.contextWindow >= tokens ? undefined
+      : `context too large for model: ~${formatTokens(tokens)} tokens, limit ${formatTokens(model.contextWindow)}`,
+  }))
 }
 
 export function formatUsd(value: number): string {

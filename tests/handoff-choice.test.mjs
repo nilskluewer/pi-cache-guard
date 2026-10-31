@@ -11,7 +11,7 @@ import extension from "../extensions/cache-guard.ts"
 process.env.PI_CACHE_RETENTION = "short"
 process.env.PI_CACHE_GUARD_MIN_USD = "0.10"
 
-const model = { provider: "anthropic", id: "expensive", name: "Current", api: "anthropic-messages",
+const model = { provider: "github-copilot", id: "claude-sonnet-5.5", name: "Current", api: "anthropic-messages",
   contextWindow: 200000, promptCache: { short: 300 }, cost: { input: 5, output: 25, cacheRead: .5, cacheWrite: 6.25 } }
 const image = { type: "image", data: "aGVsbG8=", mimeType: "image/png" }
 const request = { source: "interactive", text: "Continue my task", images: [image] }
@@ -158,7 +158,7 @@ test("cancel preserves text and images across reload and an edited retry", async
   const h = harness(t); h.pick = () => undefined
   assert.deepEqual(await h.input(), { action: "handled" })
   assert.equal(h.editor, request.text)
-  const drafts = join(h.root, "agent", "cache-guard-drafts")
+  const drafts = join(h.root, "agent", "cache-guard", "drafts")
   assert.equal(readdirSync(drafts).length, 1)
   if (process.platform !== "win32") assert.equal(statSync(join(drafts, readdirSync(drafts)[0])).mode & 0o777, 0o600)
   h.load(); h.pick = (choices) => choices.find((s) => s.startsWith("Continue"))
@@ -180,7 +180,7 @@ test("cancel preserves text and images across reload and an edited retry", async
 for (const failure of ["missing directory", "file-less", "missing image on disk"]) {
   test(`Continue retains recovery when persistence has ${failure}`, async (t) => {
     const h = harness(t, { fileLess: failure === "file-less" })
-    const drafts = join(h.root, "agent", "cache-guard-drafts")
+    const drafts = join(h.root, "agent", "cache-guard", "drafts")
     h.pick = () => undefined
     await h.input()
     h.load(); h.pick = (choices) => choices.find((s) => s.startsWith("Continue"))
@@ -230,7 +230,7 @@ for (const failure of ["missing directory", "file-less", "missing image on disk"
 
 for (const destination of ["file-less", "memory-only request", "missing image on disk", "handled input"]) {
   test(`new-session ${destination} preserves source recovery`, async (t) => {
-    const h = harness(t), drafts = join(h.root, "agent", "cache-guard-drafts")
+    const h = harness(t), drafts = join(h.root, "agent", "cache-guard", "drafts")
     if (destination === "file-less") h.fresh.sessionManager = SessionManager.inMemory(h.root)
     if (destination === "memory-only request") {
       const moved = join(h.root, "moved-fresh")
@@ -261,7 +261,7 @@ for (const destination of ["file-less", "memory-only request", "missing image on
 }
 
 test("unrelated persistence or a newer cancelled draft cannot consume recovery data", async (t) => {
-  const h = harness(t), drafts = join(h.root, "agent", "cache-guard-drafts")
+  const h = harness(t), drafts = join(h.root, "agent", "cache-guard", "drafts")
   h.pick = () => undefined
   await h.input()
   h.pick = (choices) => choices.find((s) => s.startsWith("Continue"))
@@ -330,7 +330,9 @@ test("busy or changed source cannot replace a session", async (t) => {
 
 test("unwritable recovery storage prevents replacement and retains images in memory", async (t) => {
   const h = harness(t)
-  writeFileSync(join(h.root, "agent", "cache-guard-drafts"), "Not a directory")
+  const draftsDir = join(h.root, "agent", "cache-guard", "drafts")
+  mkdirSync(dirname(draftsDir), { recursive: true })
+  writeFileSync(draftsDir, "Not a directory")
   assert.deepEqual(await h.input(), { action: "handled" })
   assert.equal(h.bridges.length, 0); assert.equal(h.editor, request.text)
   assert.ok(h.notes.some((n) => n.text.includes("memory only")))

@@ -22,7 +22,7 @@ test("parses budget amounts", () => {
 test("/cache-guard budget decides when the dialog appears and is saved", async () => {
   const handlers = new Map()
   let command
-  const model = { provider: "p", id: "m", api: "anthropic-messages", name: "M", contextWindow: 200000,
+  const model = { provider: "github-copilot", id: "claude-sonnet-5.5", api: "anthropic-messages", name: "M", contextWindow: 200000,
     promptCache: { short: 300 }, cost: { input: 5, output: 25, cacheRead: 0.5, cacheWrite: 6.25 } }
   extension({
     on: (name, fn) => handlers.set(name, fn),
@@ -33,7 +33,7 @@ test("/cache-guard budget decides when the dialog appears and is saved", async (
   const notes = []
   const ctx = {
     hasUI: true, model, scopedModels: [],
-    sessionManager: { getBranch: () => [{ type: "message", message: { role: "assistant", provider: "p", model: "m",
+    sessionManager: { getBranch: () => [{ type: "message", message: { role: "assistant", provider: "github-copilot", model: "claude-sonnet-5.5",
       timestamp: 0, usage: { input: 0, cacheRead: 100000, cacheWrite: 0 } } }] },
     getContextUsage: () => ({ tokens: 100000 }),
     ui: { select: async () => { asked++; return undefined }, setEditorText: () => {}, notify: (m, level) => notes.push([m, level]) },
@@ -57,7 +57,7 @@ test("/cache-guard budget decides when the dialog appears and is saved", async (
   assert.equal(notes.at(-1)[1], "error")
   await command.handler("budget 0.75", ctx)
 
-  const saved = JSON.parse(readFileSync(join(process.env.PI_CODING_AGENT_DIR, "cache-guard.json"), "utf8"))
+  const saved = JSON.parse(readFileSync(join(process.env.PI_CODING_AGENT_DIR, "cache-guard", "settings.json"), "utf8"))
   assert.equal(saved.budgetUsd, 0.75)
   assert.deepEqual(command.getArgumentCompletions("bud")?.map((i) => i.value), ["budget"])
   assert.ok(command.getArgumentCompletions("budget ")?.some((i) => i.value === "budget 0.5"))

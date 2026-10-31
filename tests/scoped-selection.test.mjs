@@ -1,10 +1,16 @@
 import assert from "node:assert/strict"
+import { mkdtempSync, rmSync } from "node:fs"
+import { tmpdir } from "node:os"
+import { join } from "node:path"
 import test from "node:test"
 import extension from "../extensions/cache-guard.ts"
 
-test("dialog reads live scope, never the catalog, and applies scoped thinking", async () => {
+test("dialog reads live scope, never the catalog, and applies scoped thinking", async (t) => {
+  const root = mkdtempSync(join(tmpdir(), "scoped-selection-test-"))
+  t.after(() => rmSync(root, { recursive: true, force: true }))
+  const agentDir = join(root, "agent")
   const handlers = new Map()
-  const current = { provider: "github-copilot", id: "current", api: "anthropic-messages", name: "Current",
+  const current = { provider: "github-copilot", id: "claude-sonnet-5.5", api: "anthropic-messages", name: "Current",
     contextWindow: 200000, promptCache: { short: 300 }, cost: { input: 5, output: 25, cacheRead: .5, cacheWrite: 6.25 } }
   const cheap = { ...current, provider: "other-provider", id: "scoped-cheap", name: "Cheap",
     cost: { input: 1, output: 5, cacheRead: .1, cacheWrite: 1.25 } }
@@ -15,7 +21,7 @@ test("dialog reads live scope, never the catalog, and applies scoped thinking", 
     getCommands: () => [],
     setModel: async (m) => { chosen = m; return true },
     setThinkingLevel: (level) => { thinking = level },
-  })
+  }, { handoff: { agentDir } })
   const ctx = {
     hasUI: true, model: current, scopedModels: [{ model: cheap, thinkingLevel: "low" }],
     modelRegistry: { getAvailable: () => { throw new Error("Must not read full catalog") } },

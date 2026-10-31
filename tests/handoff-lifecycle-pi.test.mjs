@@ -11,7 +11,7 @@ import { HANDOFF_PROMPT } from "../extensions/handoff.ts"
 const image = { type: "image", mimeType: "image/png", data: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGP4z8AAAAMBAQDJ/pLvAAAAAElFTkSuQmCC" }
 // Oracle: spec stories 14/24/27. Rejection must keep recovery data; Pi-owned retries
 // belong to one dispatch; shell expansion must name the file actually written.
-async function fixture(t, responses, { retry = false, trailingTemp = false, beforeSettle } = {}) {
+async function fixture(t, responses, { retry = false, trailingTemp = false, beforeSettle, rejectCompletionNotice = false } = {}) {
   const root = mkdtempSync(join(tmpdir(), "handoff-lifecycle-pi-"))
   t.after(() => rmSync(root, { recursive: true, force: true }))
   const cwd = join(root, "workspace"), agentDir = join(root, "agent")
@@ -27,9 +27,9 @@ async function fixture(t, responses, { retry = false, trailingTemp = false, befo
   const settings = SettingsManager.inMemory({ compaction: { enabled: false }, retry: { enabled: retry, maxRetries: 2, baseDelayMs: 1 }, cacheWarming: { enabled: false } })
   const modelRuntime = await ModelRuntime.create({ authPath: join(agentDir, "auth.json"), modelsPath: null,
     modelsStorePath: join(agentDir, "catalog.json"), allowModelNetwork: false, refreshOnCreate: false })
-  const provider = "handoff-lifecycle-offline", requests = [], notes = [], errors = [], events = []
-  modelRuntime.registerProvider(provider, { api: "handoff-lifecycle-api", baseUrl: "http://127.0.0.1:1",
-    models: [{ id: "fixture", name: "Offline", reasoning: false, input: ["text", "image"], contextWindow: 200000,
+  const provider = "github-copilot", requests = [], notes = [], errors = [], events = [], working = []
+  modelRuntime.registerProvider(provider, { api: "anthropic-messages", baseUrl: "http://127.0.0.1:1",
+    models: [{ id: "claude-sonnet-5.5", name: "Offline", reasoning: false, input: ["text", "image"], contextWindow: 200000,
       maxTokens: 1000, promptCache: { short: 300, long: 300 }, cost: { input: 5, output: 25, cacheRead: .5, cacheWrite: 6.25 } }],
     streamSimple: (model, context) => {
       requests.push(structuredClone(context.messages))
@@ -48,7 +48,7 @@ async function fixture(t, responses, { retry = false, trailingTemp = false, befo
       return stream
     } })
   await modelRuntime.setRuntimeApiKey(provider, "offline-key")
-  const model = modelRuntime.getModel(provider, "fixture")
+  const model = modelRuntime.getModel(provider, "claude-sonnet-5.5")
   const manager = SessionManager.create(cwd, join(root, "sessions"))
   manager.appendMessage({ role: "user", content: "Old task", timestamp: 0 })
   manager.appendMessage({ role: "assistant", provider, api: model.api, model: model.id, timestamp: 0,
@@ -68,10 +68,14 @@ async function fixture(t, responses, { retry = false, trailingTemp = false, befo
   t.after(async () => { await session.extensionRunner.emit({ type: "session_shutdown" }); session.dispose() })
   await session.bindExtensions({ mode: "tui", onError: (e) => errors.push(e),
     uiContext: { select: async (_title, choices) => pick(choices), setEditorText: () => {}, getEditorText: () => "",
-      notify: (text) => notes.push(text), setStatus: () => {}, setWidget: () => {}, theme: { fg: (_color, text) => text } } })
+      notify: (text) => {
+        notes.push(text)
+        if (rejectCompletionNotice && text.startsWith("A handoff was created")) throw new Error("Notification display failed")
+      }, setStatus: () => {}, setWidget: () => {},
+      setWorkingMessage: (text) => working.push(text), theme: { fg: (_color, text) => text } } })
   session.subscribe((event) => events.push(event.type))
-  const drafts = () => { try { return readdirSync(join(agentDir, "cache-guard-drafts")) } catch { return [] } }
-  return { root, agentDir, session, manager, modelRuntime, provider, requests, notes, errors, events, drafts,
+  const drafts = () => { try { return readdirSync(join(agentDir, "cache-guard", "drafts")) } catch { return [] } }
+  return { root, agentDir, session, manager, modelRuntime, provider, requests, notes, errors, events, working, drafts,
     set pick(value) { pick = value }, state: () => manager.getEntries().filter((e) => e.type === "custom" && e.customType === "cache-guard.handoff").at(-1)?.data }
 }
 
@@ -91,7 +95,8 @@ for (const retry of [false, true]) test(`real Pi generation uses bash output and
   assert.equal(h.requests.length, retry ? 3 : 2)
   assert.equal(h.manager.getEntries().filter((e) => e.type === "message" && e.message.role === "user" && JSON.stringify(e.message.content).includes(HANDOFF_PROMPT.slice(0, 30))).length, 1)
   assert.equal(h.notes.filter((n) => n.startsWith("Handoff failed:")).length, 0)
-  assert.equal(h.notes.filter((n) => n.startsWith("Handoff saved:")).length, 1)
+  assert.equal(h.notes.filter((n) => n.startsWith("A handoff was created")).length, 1)
+  assert.deepEqual(h.working, ["Preparing handoff…", undefined], "working label spans the run, including retries, and then resets")
   assert.deepEqual(h.errors, [])
 })
 
@@ -102,7 +107,8 @@ test("real Pi continuation updates the artifact before final success notificatio
       arguments: { path: join(root, "handoff.md"), content: n === 1 ? "# Draft\n" : "# Final handoff\n" } }] }
     return {}
   }, { beforeSettle: (event) => {
-    assert.equal(h.notes.some((n) => n.startsWith("Handoff saved:")), false, "success is not final at the actionable boundary")
+    assert.equal(h.notes.some((n) => n.startsWith("A handoff was created")), false, "success is not final at the actionable boundary")
+    assert.deepEqual(h.working, ["Preparing handoff…"], "continuation must not reset the working label early")
     if (continued) return
     continued = true
     return { entries: [...event.entries, { type: "custom_message", customType: "offline-verification", content: "Verify the handoff", display: false }], continue: true }
@@ -113,7 +119,8 @@ test("real Pi continuation updates the artifact before final success notificatio
   assert.equal(h.requests.length, 4)
   assert.equal(h.state().status, "ready")
   assert.ok(readFileSync(h.state().artifact.path, "utf8").endsWith("# Final handoff\n"))
-  assert.equal(h.notes.filter((n) => n.startsWith("Handoff saved:")).length, 1)
+  assert.equal(h.notes.filter((n) => n.startsWith("A handoff was created")).length, 1)
+  assert.deepEqual(h.working, ["Preparing handoff…", undefined])
   assert.deepEqual(h.errors, [])
 })
 
@@ -125,8 +132,22 @@ test("real Pi exhausted retries report one final failure and never dispatch anot
   assert.equal(h.requests.length, 3)
   assert.equal(h.state().status, "failed")
   assert.equal(h.notes.filter((n) => n.startsWith("Handoff failed:")).length, 1)
-  assert.equal(h.notes.some((n) => n.startsWith("Handoff saved:")), false)
+  assert.equal(h.notes.some((n) => n.startsWith("A handoff was created")), false)
+  assert.deepEqual(h.working, ["Preparing handoff…", undefined], "failed runs must restore the regular working label")
   assert.equal(h.manager.getEntries().filter((e) => e.type === "custom" && e.customType === "cache-guard.handoff" && e.data.status === "dispatched").length, 1)
+  assert.deepEqual(h.errors, [])
+})
+
+test("real Pi completion display failure cannot undo a verified durable handoff", { timeout: 15000 }, async (t) => {
+  const h = await fixture(t, (n, root) => n === 1 ? { reason: "toolUse", content: [{ type: "toolCall", id: "write-notice-test", name: "write",
+    arguments: { path: join(root, "handoff.md"), content: "# Saved despite display failure\n" } }] } : {}, { rejectCompletionNotice: true })
+  const settled = new Promise((resolve) => { const unsub = h.session.subscribe((event) => { if (event.type === "agent_settled") { unsub(); resolve() } }) })
+  await h.session.prompt("/fixture-handoff")
+  await settled
+  assert.equal(h.state().status, "ready")
+  assert.ok(readFileSync(h.state().artifact.path, "utf8").endsWith("# Saved despite display failure\n"))
+  assert.equal(h.notes.some((text) => text.startsWith("Handoff failed:")), false)
+  assert.deepEqual(h.working, ["Preparing handoff…", undefined])
   assert.deepEqual(h.errors, [])
 })
 

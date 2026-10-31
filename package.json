@@ -1,7 +1,7 @@
 {
   "name": "@nilskluewer/pi-cache-guard",
-  "version": "0.4.0",
-  "description": "Pi extension that shows a prompt-cache countdown and asks before a message re-writes an expired cache, with predicted cost and cheaper model options.",
+  "version": "0.6.1",
+  "description": "Pi extension with a prompt-cache countdown and cost warnings. Dynamically adjusts cache estimates from API-reported hits and misses. With contributions from @paulrohde675.",
   "type": "module",
   "keywords": [
     "pi-package",
@@ -17,6 +17,12 @@
     "name": "Nils Klüwer",
     "url": "https://github.com/nilskluewer"
   },
+  "contributors": [
+    {
+      "name": "paulrohde675",
+      "url": "https://github.com/paulrohde675"
+    }
+  ],
   "license": "MIT",
   "repository": {
     "type": "git",
@@ -28,17 +34,21 @@
   "homepage": "https://github.com/nilskluewer/pi-cache-guard#readme",
   "files": [
     "extensions",
+    "assets",
     "README.md",
+    "PATCH_NOTES.md",
     "LICENSE"
   ],
   "pi": {
     "extensions": [
       "./extensions/cache-guard.ts"
-    ]
+    ],
+    "image": "https://cdn.jsdelivr.net/npm/@nilskluewer/pi-cache-guard@0.6.1/assets/cache-guard-preview.png"
   },
   "peerDependencies": {
     "@earendil-works/pi-ai": "*",
-    "@earendil-works/pi-coding-agent": ">=1.0.0"
+    "@earendil-works/pi-tui": "*",
+    "@earendil-works/pi-coding-agent": ">=1.3.0"
   },
   "scripts": {
     "test": "node --experimental-strip-types --test tests/*.test.mjs",

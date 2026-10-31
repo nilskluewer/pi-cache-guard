@@ -3,3 +3,7 @@ node_modules/
 *.tgz
 npm-debug.log*
 *.tsbuildinfo
+.scratch/cache-probe/
+.scratch/
+.agents/
+skills-lock.json

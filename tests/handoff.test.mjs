@@ -7,12 +7,14 @@ import test from "node:test"
 import { SessionManager } from "@earendil-works/pi-coding-agent"
 import extension from "../extensions/cache-guard.ts"
 
-// Oracle: the original prompt in the spec. No changes, metadata instructions, or focus.
+// Oracle: the current user-authored handoff prompt, passed without added instructions or focus.
 const PROMPT = `Write a handoff document summarising the current conversation so a fresh agent can continue the work. Save to the temporary directory of the user's OS ($TMPDIR, else /tmp; %TEMP% on Windows) - not the current workspace.
 
-Include a "suggested skills" section in the document, naming which skills the next agent should call the Skill tool for.
+Include a "used skills" section in the document, naming which skills the previous agent used.
 
-Do not duplicate content already captured in other artifacts (specs, plans, ADRs, issues, commits, diffs). Reference them by path or URL instead.
+Do not duplicate content already captured in other artifacts (specs, plans, ADRs, issues, commits, diffs). Reference them by path or URL instead. Include important paths to proceed the conversation. Make a list of Paths used relevant.
+
+If there was a Goal / North Star set, repeat it word by word. If there was a change in plan - document why this change happend and the reasons behind it.
 
 Redact any sensitive information, such as API keys, passwords, or personally identifiable information.
 
@@ -102,10 +104,10 @@ test("current-session run preserves prompt and saves a durable, private artifact
   assert.equal(metadata.source_leaf_id, h.sourceLeaf)
   assert.ok(Number.isFinite(Date.parse(metadata.created_at)))
   assert.equal(available.completedLeafId, state.completedLeafId)
-  assert.match(h.notes.at(-1).text, /Handoff saved:/)
+  assert.equal(h.notes.at(-1).text, 'A handoff was created while you were away. Send a message to continue; when the cold-cache dialog appears, select "New session with saved handoff" to use it.')
   if (process.platform !== "win32") {
     assert.equal(statSync(available.path).mode & 0o777, 0o600)
-    assert.equal(statSync(join(h.root, "agent", "handoffs")).mode & 0o777, 0o700)
+    assert.equal(statSync(join(h.root, "agent", "cache-guard", "handoffs")).mode & 0o777, 0o700)
   }
   // Only custom entries carry extension state. They are absent from model context.
   assert.equal(h.manager.buildSessionContext().messages.some((m) => m.role === "custom"), false)
@@ -118,7 +120,7 @@ test("a staging collision fails without touching the existing file", async (t) =
   await h.start()
   const path = join(h.root, "handoff.md")
   await h.tool("write", { path }, () => writeFileSync(path, "# Real handoff\n"))
-  const dir = join(h.root, "agent", "handoffs")
+  const dir = join(h.root, "agent", "cache-guard", "handoffs")
   mkdirSync(dir, { recursive: true })
   const unrelated = join(dir, `${h.service.getState(h.ctx).runId}.partial`)
   writeFileSync(unrelated, "keep me")
@@ -310,7 +312,7 @@ for (const mode of ["guard write", "dispatch", "durable storage", "result metada
       await h.start()
       const path = join(h.root, "handoff.md")
       await h.tool("write", { path }, () => writeFileSync(path, "# Handoff\n"))
-      if (mode === "durable storage") writeFileSync(join(h.root, "agent"), "not a directory")
+      if (mode === "durable storage") writeFileSync(join(h.root, "agent", "cache-guard", "handoffs"), "not a directory")
       if (mode === "result metadata") {
         const append = h.pi.appendEntry
         h.pi.appendEntry = (type, data) => {
@@ -319,12 +321,12 @@ for (const mode of ["guard write", "dispatch", "durable storage", "result metada
         }
       }
       if (mode === "final collision") {
-        mkdirSync(join(h.root, "agent", "handoffs"), { recursive: true })
-        writeFileSync(join(h.root, "agent", "handoffs", `${h.service.getState(h.ctx).runId}.md`), "keep existing final")
+        mkdirSync(join(h.root, "agent", "cache-guard", "handoffs"), { recursive: true })
+        writeFileSync(join(h.root, "agent", "cache-guard", "handoffs", `${h.service.getState(h.ctx).runId}.md`), "keep existing final")
       }
       await h.finish()
-      if (mode === "result metadata") assert.deepEqual(readdirSync(join(h.root, "agent", "handoffs")), [])
-      if (mode === "final collision") assert.equal(readFileSync(join(h.root, "agent", "handoffs", `${h.service.getState(h.ctx).runId}.md`), "utf8"), "keep existing final")
+      if (mode === "result metadata") assert.deepEqual(readdirSync(join(h.root, "agent", "cache-guard", "handoffs")), [])
+      if (mode === "final collision") assert.equal(readFileSync(join(h.root, "agent", "cache-guard", "handoffs", `${h.service.getState(h.ctx).runId}.md`), "utf8"), "keep existing final")
     }
     assert.equal(h.service.getState(h.ctx).status, "failed")
     assert.equal(h.service.getAvailable(h.ctx), undefined)
@@ -379,16 +381,17 @@ for (const mode of ["binary", "changed after verification"]) {
   })
 }
 
-// Storage validation must not create extension files inside the workspace, even on failure.
+// Handoff storage must not add files inside the workspace, even when the configured agent directory is there.
 test("an unsafe durable directory leaves the workspace unchanged", async (t) => {
   const h = harness(t, { agentWithinWorkspace: true })
-  mkdirSync(h.ctx.cwd)
+  const before = readdirSync(h.ctx.cwd)
   await h.start()
   const path = join(h.root, "handoff.md")
   await h.tool("write", { path }, () => writeFileSync(path, "# Handoff\n"))
   await h.finish()
   assert.equal(h.service.getState(h.ctx).status, "failed")
-  assert.deepEqual(readdirSync(h.ctx.cwd), [])
+  assert.deepEqual(readdirSync(h.ctx.cwd), before)
+  assert.deepEqual(readdirSync(join(h.ctx.cwd, "agent", "cache-guard")), [])
 })
 
 test("output-only tool evidence cannot adopt a file created before this run", async (t) => {
