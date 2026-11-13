@@ -6,6 +6,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
+### Fixed
+
+- Pi no longer exits with `uncaughtException: This extension ctx is stale after session replacement or reload` when a session is reloaded or replaced (`/reload`, `/new`, `/resume`, fork). Status widget render callbacks now capture the theme once in `refreshStatus()` instead of reading `ctx.ui` lazily inside the TUI render loop, and the widget/status are cleared on `session_shutdown` so render closures do not outlive their session.
+
 ## [0.6.1] - 2026-10-31
 
 ### Changed
