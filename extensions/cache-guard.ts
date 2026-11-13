@@ -191,6 +191,8 @@ export default function cacheGuardExtension(pi: ExtensionAPI, options: { handoff
   const refreshStatus = () => {
     const ctx = current
     if (!ctx?.hasUI) return
+    // Resolve the theme now: render callbacks outlive this ctx, and touching a stale ctx.ui throws inside the TUI render loop.
+    const theme = ctx.ui.theme
     const state = inspect(ctx)
     if (!state || state.status.state === "none") {
       show(ctx, undefined)
@@ -205,12 +207,12 @@ export default function cacheGuardExtension(pi: ExtensionAPI, options: { handoff
         state.estimate.unobservedWrites ? "writes unconfirmed" : undefined,
       ].filter(Boolean).join(" · ")
       show(ctx, () => ({
-        primary: ctx.ui.theme.fg("muted", state.estimate.variable ? "cache duration variable" : "cache duration unknown"),
-        compactPrimary: ctx.ui.theme.fg("muted", state.estimate.variable ? "cache variable" : "cache unknown"),
+        primary: theme.fg("muted", state.estimate.variable ? "cache duration variable" : "cache duration unknown"),
+        compactPrimary: theme.fg("muted", state.estimate.variable ? "cache variable" : "cache unknown"),
         ...(detail ? {
-          secondary: ctx.ui.theme.fg("muted", detail),
-          inlineSecondary: ctx.ui.theme.fg("muted", detail),
-          compactSecondary: ctx.ui.theme.fg("muted", maxHit ? `hits ≤${maxHit}` : detail),
+          secondary: theme.fg("muted", detail),
+          inlineSecondary: theme.fg("muted", detail),
+          compactSecondary: theme.fg("muted", maxHit ? `hits ≤${maxHit}` : detail),
         } : {}),
       }))
       return
@@ -232,7 +234,6 @@ export default function cacheGuardExtension(pi: ExtensionAPI, options: { handoff
         state.estimate.unobservedWrites ? "writes $0/unreported" : undefined,
       ].filter(Boolean).join(", ")
       show(ctx, () => {
-        const { theme } = ctx.ui
         const baseDetail = theme.fg(color, filled) + theme.fg("borderMuted", empty) + theme.fg(color, " " + time + " " + qualifier)
         const fullDetail = notes ? baseDetail + theme.fg("muted", " · " + notes) : baseDetail
         return {
@@ -248,11 +249,11 @@ export default function cacheGuardExtension(pi: ExtensionAPI, options: { handoff
     }
     const cost = state.tokens > 0 ? "~" + formatUsd(coldCost(state.model, state.tokens, state.retention)) : undefined
     show(ctx, () => ({
-      primary: ctx.ui.theme.fg("error", "◷ cache est. ended"),
-      compactPrimary: ctx.ui.theme.fg("error", "◷ past estimate"),
-      secondary: cost ? ctx.ui.theme.fg("error", "On a miss: " + cost) : undefined,
-      inlineSecondary: cost ? ctx.ui.theme.fg("error", "miss " + cost) : undefined,
-      compactSecondary: cost ? ctx.ui.theme.fg("error", "miss " + cost) : undefined,
+      primary: theme.fg("error", "◷ cache est. ended"),
+      compactPrimary: theme.fg("error", "◷ past estimate"),
+      secondary: cost ? theme.fg("error", "On a miss: " + cost) : undefined,
+      inlineSecondary: cost ? theme.fg("error", "miss " + cost) : undefined,
+      compactSecondary: cost ? theme.fg("error", "miss " + cost) : undefined,
     }))
   }
 
@@ -543,9 +544,11 @@ export default function cacheGuardExtension(pi: ExtensionAPI, options: { handoff
     refreshStatus()
   })
 
-  pi.on("session_shutdown", () => {
+  pi.on("session_shutdown", (_event, ctx) => {
     learner.reset()
     closeCorner()
+    // Drop widgets/status whose render closures would otherwise outlive this session.
+    try { if (ctx.hasUI) show(ctx, undefined) } catch {}
     if (timer) clearInterval(timer)
     timer = undefined
     current = undefined
